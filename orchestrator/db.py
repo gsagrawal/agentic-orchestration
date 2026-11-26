@@ -46,6 +46,20 @@ BEGIN SELECT RAISE(ABORT, 'session_log is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS session_log_no_delete BEFORE DELETE ON session_log
 BEGIN SELECT RAISE(ABORT, 'session_log is append-only'); END;
 
+-- Executors announce themselves here; the manager picks from this list.
+-- last_heartbeat is refreshed by the executor (step 5).
+CREATE TABLE IF NOT EXISTS executors (
+    id             TEXT PRIMARY KEY,
+    last_heartbeat REAL NOT NULL
+);
+
+-- Written by the rollup job (NOT BUILT here; tests write it directly). The session
+-- manager only READS this flag at admission; it never sums usage itself.
+CREATE TABLE IF NOT EXISTS tenant_budget (
+    tenant      TEXT PRIMARY KEY,
+    over_budget INTEGER NOT NULL DEFAULT 0
+);
+
 -- Tool service tables (see tool_service.py).
 -- One stored result per idempotency key ("<session_id>:<step>").
 CREATE TABLE IF NOT EXISTS tool_results (

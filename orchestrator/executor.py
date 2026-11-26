@@ -95,6 +95,7 @@ class Executor:
     def __init__(self, db_path: str, agents_path: str, executor_id: str, tool_delay: float = 0.0, model=None):
         self.executor_id = executor_id
         self.conn = connect(db_path)
+        state_table.register_executor(self.conn, executor_id, time.time())
         self.tools = ToolService(db_path, default_tools(tool_delay))
         self.agents = AgentStore(agents_path)
         self.model = model or ScriptedModel()

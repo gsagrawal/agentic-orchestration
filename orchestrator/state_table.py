@@ -13,11 +13,12 @@ from .errors import SessionClosed, StaleEpoch, UnknownSession
 
 def create_session(
     conn: sqlite3.Connection, session_id: str, tenant: str, step_cap: int,
-    agent_id: str | None = None, agent_version: int | None = None,
+    agent_id: str | None = None, agent_version: int | None = None, run_deadline: float | None = None,
 ) -> None:
     conn.execute(
-        "INSERT INTO sessions (id, tenant, step_cap, agent_id, agent_version) VALUES (?, ?, ?, ?, ?)",
-        (session_id, tenant, step_cap, agent_id, agent_version),
+        "INSERT INTO sessions (id, tenant, step_cap, agent_id, agent_version, run_deadline) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (session_id, tenant, step_cap, agent_id, agent_version, run_deadline),
     )
 
 
@@ -71,3 +72,41 @@ def release(conn: sqlite3.Connection, session_id: str, epoch: int, new_state: st
         if row is None:
             get_session(conn, session_id)  # raises UnknownSession if it does not exist
             raise StaleEpoch(f"{session_id}: epoch {epoch} is not current")
+
+
+LIVE_STATES = ("created", "running", "waiting")  # everything that is not terminal
+
+
+def count_live(conn: sqlite3.Connection, tenant: str) -> int:
+    marks = ",".join("?" * len(LIVE_STATES))
+    return conn.execute(
+        f"SELECT COUNT(*) FROM sessions WHERE tenant = ? AND state IN ({marks})", (tenant, *LIVE_STATES)
+    ).fetchone()[0]
+
+
+def is_over_budget(conn: sqlite3.Connection, tenant: str) -> bool:
+    row = conn.execute("SELECT over_budget FROM tenant_budget WHERE tenant = ?", (tenant,)).fetchone()
+    return bool(row and row["over_budget"])
+
+
+def register_executor(conn: sqlite3.Connection, executor_id: str, now: float) -> None:
+    conn.execute(
+        "INSERT INTO executors (id, last_heartbeat) VALUES (?, ?) "
+        "ON CONFLICT(id) DO UPDATE SET last_heartbeat = excluded.last_heartbeat",
+        (executor_id, now),
+    )
+
+
+def least_loaded_executor(conn: sqlite3.Connection) -> str | None:
+    """The registered executor with the fewest running sessions (ties: lowest id), or None."""
+    row = conn.execute(
+        "SELECT e.id FROM executors e "
+        "LEFT JOIN sessions s ON s.executor_id = e.id AND s.state = 'running' "
+        "GROUP BY e.id ORDER BY COUNT(s.id), e.id LIMIT 1"
+    ).fetchone()
+    return row["id"] if row else None
+
+
+def unassigned_sessions(conn: sqlite3.Connection) -> list[str]:
+    rows = conn.execute("SELECT id FROM sessions WHERE state = 'created' ORDER BY rowid").fetchall()
+    return [r["id"] for r in rows]
