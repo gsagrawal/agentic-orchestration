@@ -118,7 +118,7 @@ server, the workers and the client all compete; they are not capacity numbers.
 
 ## Measurements
 
-Produced by `make bench`; copied here unedited from the run that produced them.
+Produced by `make bench` on the final code (re-run after the review fixes); copied here from that run.
 
 Machine: 4 vCPU, Intel(R) Xeon(R) Processor @ 2.10GHz; Python 3.13.18; dev server in-memory, one node.
 
@@ -126,9 +126,9 @@ Machine: 4 vCPU, Intel(R) Xeon(R) Processor @ 2.10GHz; Python 3.13.18; dev serve
 
 | workers | sessions/s per run | median |
 |---|---|---|
-| 1 | 23.8, 25.8, 24.8 | 24.8 |
-| 2 | 28.3, 25.9, 28.3 | 28.3 |
-| 4 | 28.3, 27.1, 24.3 | 27.1 |
+| 1 | 24.8, 24.8, 27.0 | 24.8 |
+| 2 | 27.6, 28.2, 27.7 | 27.7 |
+| 4 | 30.5, 26.9, 25.4 | 26.9 |
 
 ### Worker death to resume (20 trials, 2 workers, SIGKILL mid tool call)
 
@@ -136,14 +136,14 @@ Settings: heartbeat interval 1.0 s, heartbeat timeout 3.0 s, sticky queue timeou
 
 | measure | p50 | p95 | min | max |
 |---|---|---|---|---|
-| kill -> next attempt starts (s) | 3.99 | 4.00 | 3.99 | 4.00 |
-| kill -> session finished (s) | 10.08 | 10.11 | 10.07 | 10.11 |
+| kill -> next attempt starts (s) | 3.99 | 4.00 | 3.98 | 4.00 |
+| kill -> session finished (s) | 10.07 | 10.09 | 10.06 | 10.10 |
 
 n = 20 per row; with this n the p95 is set by the two or three slowest trials.
 
 What the numbers do and do not say:
 
-- **Throughput does not grow with workers here** (about 25 sessions/s with one worker, about 27-28
+- **Throughput does not grow with workers here** (about 25 sessions/s with one worker, about 27
   with two or four). With everything on 4 shared cores, the likely limit is the dev server and the
   client, not the workers; this was not investigated, so treat that as a hypothesis. These numbers
   say nothing about a real cluster.
