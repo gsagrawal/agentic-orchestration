@@ -27,4 +27,5 @@ make test
 SQLite on one machine proves the *logic* (fencing, replay, idempotency), not
 distributed behaviour. With Postgres or a real queue you would also have to deal
 with row locks and lock timeouts, leases under clock skew, and network
-partitions, none of which this code exercises.
+partitions, none of which this code exercises. Also, `synchronous=NORMAL` survives `kill -9` of a process
+but not necessarily an OS crash or power loss.

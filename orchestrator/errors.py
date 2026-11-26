@@ -11,3 +11,7 @@ class StaleEpoch(Exception):
 
 class UnknownSession(Exception):
     """The session id does not exist. This is a bug in the caller, not a fencing event."""
+
+
+class SessionClosed(Exception):
+    """The session is in a terminal state (done, cancelled, expired, stopped) and cannot be assigned."""

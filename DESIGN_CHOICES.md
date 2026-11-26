@@ -19,3 +19,7 @@ swappable state plumbing) are implemented as specified and are not repeated here
 | 8 | States: `created, running, waiting, done, cancelled, expired, stopped`, enforced by a CHECK constraint. `stopped` means cut off by the step cap or active-run limit. | The architecture doc's `admitted`/`resumed`. | `admitted` and `created` are the same moment in this MVP, and `resumed` is just `running` with a higher epoch. Fewer states, fewer transitions to test. |
 | 9 | Separate `run_deadline` and `wait_deadline` columns. | One `deadline`. | Decision 4 requires two different timers; one column would conflate them. |
 | 10 | One SQLite file for state table and log, one connection per process, WAL, `busy_timeout` 10 s, autocommit with explicit `BEGIN IMMEDIATE`. | Python's implicit transactions; separate files for log and state. | Implicit transactions start deferred and make read-then-write racy. One file keeps the epoch check and the insert atomic (two files could not). |
+| 11 | `assign()` refuses terminal sessions (`SessionClosed`). | Let the caller check the state first. | A check outside the transaction races; found in self-review of step 1. |
+| 12 | `synchronous=NORMAL`. | `FULL`. | Safe against `kill -9` (what the tests do) but may lose the last commits on OS crash or power loss. Chosen for speed; a real deployment would not accept this. |
+
+Open item (decide in step 7): `append()` checks only the epoch, so the last holder can still write to a session that has just gone terminal. The terminal transition should bump the epoch so the holder is fenced.

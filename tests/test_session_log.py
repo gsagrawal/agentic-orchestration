@@ -7,7 +7,7 @@ import time
 import pytest
 
 from orchestrator import db, session_log, state_table
-from orchestrator.errors import StaleEpoch, UnknownSession
+from orchestrator.errors import SessionClosed, StaleEpoch, UnknownSession
 
 
 @pytest.fixture
@@ -80,6 +80,21 @@ def test_sessions_are_fenced_independently(conn):
     session_log.append(conn, "a", ea, "model", {})
 
 
+@pytest.mark.parametrize("terminal", ["done", "cancelled", "expired", "stopped"])
+def test_terminal_session_is_never_reassigned(conn, session, terminal):
+    epoch = state_table.assign(conn, session, "ex-A")
+    conn.execute("UPDATE sessions SET state = ? WHERE id = ?", (terminal, session))
+    with pytest.raises(SessionClosed):
+        state_table.assign(conn, session, "ex-B")
+    row = state_table.get_session(conn, session)
+    assert (row["state"], row["epoch"], row["executor_id"]) == (terminal, epoch, "ex-A")
+
+
+def test_assign_unknown_session(conn):
+    with pytest.raises(UnknownSession):
+        state_table.assign(conn, "nope", "ex-A")
+
+
 def test_log_is_append_only(conn, session):
     epoch = state_table.assign(conn, session, "ex-A")
     session_log.append(conn, session, epoch, "model", {})
@@ -121,7 +136,8 @@ def test_concurrent_appends_racing_a_reassignment_never_write_out_of_epoch_order
     threads = [threading.Thread(target=zombie_writer) for _ in range(4)]
     for t in threads:
         t.start()
-    while len(session_log.read(setup, "s1")) < 50:  # let them get going
+    give_up = time.time() + 10
+    while len(session_log.read(setup, "s1")) < 50 and time.time() < give_up:  # let them get going
         pass
     new = state_table.assign(setup, "s1", "ex-B")  # the reassignment
     for _ in range(20):
