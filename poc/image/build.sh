@@ -28,6 +28,6 @@ fi
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 tar -xzf "$TGZ" -C "$tmp"
 install -m 0755 "$tmp/pandoc-${VERSION}/bin/pandoc" build/pandoc
-BASE_ARG="--build-arg BASE=${SANDBOX_BASE:-mirror.gcr.io/library/python:3.12-slim-bookworm}"
+BASE_ARG=${SANDBOX_BASE:+"--build-arg BASE=$SANDBOX_BASE"}     # default: the digest-pinned base in the Dockerfile
 docker build $BASE_ARG --target full -t "$IMAGE" .
 docker build $BASE_ARG --target base -t "${IMAGE}-nopandoc" .

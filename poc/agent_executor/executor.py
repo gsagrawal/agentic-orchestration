@@ -67,8 +67,12 @@ class AgentExecutor:
                     result = {"error": f"{type(exc).__name__}: {exc}"}
                 results.append(self._log(caller, step, call, result))
         finally:
-            if session.sandbox is not None and session.sandbox.alive:
-                self.controller.stop(session.sandbox)
+            if session.sandbox is not None and not session.sandbox.stopped:
+                try:
+                    self.controller.stop(session.sandbox)
+                except (SandboxError, OSError) as exc:        # do not throw away the work that was done
+                    results.append(self._log(caller, len(results) + 1, ToolCall("(cleanup)", ""),
+                                             {"error": f"cleanup failed: {type(exc).__name__}: {exc}"}))
         return results
 
     def _run_step(self, session: "_Session", caller: Caller, call: ToolCall, workdir: Path, session_end: float) -> dict:

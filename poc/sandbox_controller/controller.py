@@ -68,7 +68,8 @@ class Sandbox:
     caller: Caller | None = None
     ip: str | None = None           # its address on its own private network (proxied sandboxes only)
     network: str | None = None
-    alive: bool = True
+    alive: bool = True       # False as soon as stop() is requested: no more commands
+    stopped: bool = False    # True only once cleanup fully succeeded; until then stop() may be retried
 
 
 class SandboxController:
@@ -86,7 +87,7 @@ class SandboxController:
         workdir = Path(workdir).resolve()
         self._check_mount_path(workdir, "workdir")
         if self.proxy:
-            self._check_mount_path(self.proxy.ca_cert, "ca_cert")
+            self._check_mount_path(Path(self.proxy.ca_cert).resolve(), "ca_cert")
         if self.proxy and caller is None:
             raise SandboxError("a proxied sandbox needs a caller identity to register")
         env = self._placeholder_env(caller) if self.proxy else {}   # validates before anything is fenced or created
@@ -159,24 +160,33 @@ class SandboxController:
             attempt(self._remove_network, sandbox.network)
         if sandbox.caller and self._by_session.get(sandbox.caller.session) is sandbox:
             del self._by_session[sandbox.caller.session]
+        sandbox.stopped = not errors
         if errors:
             raise errors[0]
 
     def reap(self) -> None:
-        """Remove every sandbox and sandbox network this controller's label owns, e.g. after a crash."""
+        """Remove every sandbox and sandbox network this label owns, and forget every registered caller:
+        recovery after a crash. Keeps going past a failure and raises the first one at the end."""
+        errors: list[Exception] = []
         ids = self._docker(["ps", "-aq", "--filter", f"label={LABEL}"], "list sandboxes").split()
-        names = self._docker(["ps", "-a", "--filter", f"label={LABEL}", "--format", "{{.Names}}"], "list sandboxes").split()
         if self.proxy:
-            for name in names:                       # stop trusting their addresses before anything else
-                self.proxy.registry.unregister(name)
+            self.proxy.registry.clear()             # first: stop trusting every address, including those of sandboxes already gone
         if ids:
             subprocess.run([self.docker, "kill", *ids], capture_output=True)
-            for container in ids:
+        for container in ids:
+            try:
                 self._wait_until_gone(container)
+            except SandboxError as exc:
+                errors.append(exc)
         for net in self._docker(["network", "ls", "-q", "--filter", f"label={LABEL}", "--format", "{{.Name}}"],
                                 "list networks").split():
-            self._remove_network(net)
+            try:
+                self._remove_network(net)
+            except SandboxError as exc:
+                errors.append(exc)
         self._by_session.clear()
+        if errors:
+            raise errors[0]
 
     def _wait_until_gone(self, name: str, timeout_s: float = 10) -> None:
         """`docker kill` returns once the signal is sent; `--rm` removes the container a moment later.
@@ -218,18 +228,33 @@ class SandboxController:
         return env
 
     def _fence(self, caller: Caller) -> None:
-        """Starting a sandbox with a newer epoch stops the old one; an older or equal epoch is refused."""
-        if self.proxy and caller.epoch < self.proxy.registry.newest_epoch(caller.session):
-            raise SandboxError(f"stale epoch {caller.epoch} for session {caller.session} "
-                               f"(registry has {self.proxy.registry.newest_epoch(caller.session)})")
+        """A newer epoch supersedes older ones: their sandboxes are stopped. An older epoch is refused, and so is
+        an equal one while another sandbox for the session is alive (two sandboxes must never hold the session).
+        Both the in-memory map and the registry are consulted, so a restarted or second controller is fenced too.
+        Fencing happens before the new sandbox exists: if creating it then fails, the old one stays stopped and
+        the epoch stays raised, because the newer executor now owns the session and retries."""
         old = self._by_session.get(caller.session)
         if old and caller.epoch <= old.caller.epoch:
-            raise SandboxError(f"stale epoch {caller.epoch} for session {caller.session} "
-                               f"(current {old.caller.epoch})")
+            raise SandboxError(f"stale epoch {caller.epoch} for session {caller.session} (current {old.caller.epoch})")
         if self.proxy:
-            self.proxy.registry.bump_epoch(caller.session, caller.epoch)  # fence at the proxy first
+            registry = self.proxy.registry
+            if caller.epoch < (newest := registry.newest_epoch(caller.session)):
+                raise SandboxError(f"stale epoch {caller.epoch} for session {caller.session} (registry has {newest})")
+            for name, epoch in registry.sandboxes(caller.session):
+                if old is not None and name == old.name:
+                    continue
+                if not self._exists(name):
+                    registry.unregister(name)                       # a stale entry for a sandbox that is gone
+                elif epoch >= caller.epoch:
+                    raise SandboxError(f"session {caller.session} already has a live sandbox {name} at epoch {epoch}")
+                else:
+                    self.stop(Sandbox(name=name, workdir=Path("."), limits=Limits(), network=f"agentpoc_{name}"))
+            registry.bump_epoch(caller.session, caller.epoch)       # fence at the proxy before anything else changes
         if old:
             self.stop(old)
+
+    def _exists(self, name: str) -> bool:
+        return subprocess.run([self.docker, "inspect", name], capture_output=True).returncode == 0
 
     def _network_args(self, sandbox: Sandbox, env: dict[str, str]) -> list[str]:
         if self.proxy is None:
@@ -240,7 +265,7 @@ class SandboxController:
                                     "NODE_EXTRA_CA_CERTS", "GIT_SSL_CAINFO")})
         env.update({k: self.proxy.proxy_url for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")})
         args = ["--network", sandbox.network,
-                "--mount", f"type=bind,src={self.proxy.ca_cert},dst={ca},readonly"]
+                "--mount", f"type=bind,src={Path(self.proxy.ca_cert).resolve()},dst={ca},readonly"]
         for k, v in env.items():
             args += ["--env", f"{k}={v}"]
         return args

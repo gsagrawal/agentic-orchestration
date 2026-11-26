@@ -1,6 +1,7 @@
 """Network: the sandbox reaches only the proxy, and the proxy enforces who, where, and how often."""
 import json
 import subprocess
+from pathlib import Path
 import threading
 import time
 
@@ -254,3 +255,52 @@ def test_dockerignore_keeps_state_out_of_the_build_context():
     # this file), but the legacy builder sends the whole directory, including the proxy's CA private key.
     ignore = (STATE.parent / ".dockerignore").read_text().split()
     assert ".state" in ignore and ".work" in ignore
+
+
+def test_a_second_controller_refuses_an_equal_epoch_while_the_first_sandbox_lives(proxied, tmp_path):
+    import pytest
+    from sandbox_controller import SandboxController, SandboxError
+    ctl, live = proxied(session="equal", epoch=4)
+    fresh = SandboxController(proxy=ctl.proxy)
+    with pytest.raises(SandboxError, match="live sandbox"):
+        fresh.create(tmp_path / "e", Caller(live.caller.session, "agent-a", "tenant-a", 4))
+
+
+def test_a_newer_epoch_from_another_controller_stops_the_old_sandbox(proxied, tmp_path):
+    from sandbox_controller import SandboxController
+    ctl, old = proxied(session="takeover", epoch=1)
+    fresh = SandboxController(proxy=ctl.proxy)                # no memory of `old`: only the registry knows it
+    new = fresh.create(tmp_path / "t", Caller(old.caller.session, "agent-a", "tenant-a", 2))
+    try:
+        assert subprocess.run(["docker", "inspect", old.name], capture_output=True).returncode != 0
+        assert [e for _, e in proxied.registry.sandboxes(old.caller.session)] == [2]
+    finally:
+        fresh.stop(new)
+
+
+def test_reap_drops_registry_entries_for_sandboxes_that_already_vanished(proxied):
+    ctl, sbx = proxied()
+    subprocess.run(["docker", "kill", sbx.name], capture_output=True)       # expired on its own; the registry still lists it
+    ctl.reap()
+    assert proxied.registry.lookup(sbx.ip) is None
+
+
+def test_a_relative_ca_path_works(proxied, tmp_path):
+    import dataclasses
+    import os
+    from sandbox_controller import SandboxController
+    ctl, _ = proxied()
+    rel = os.path.relpath(ctl.proxy.ca_cert)
+    other = SandboxController(proxy=dataclasses.replace(ctl.proxy, ca_cert=Path(rel)))
+    sbx = other.create(tmp_path / "r", Caller("s-rel-ca-" + tmp_path.name[-6:], "agent-a", "tenant-a", 1))
+    other.stop(sbx)
+
+
+def test_the_registry_directory_is_not_world_writable(stack):
+    # It is the proxy's trust root: whoever can replace registry.json decides which caller is which tenant.
+    assert not (STATE / "registry").stat().st_mode & 0o002
+
+
+def test_base_images_are_pinned_by_digest():
+    for dockerfile in ("image/Dockerfile", "agent_network_proxy/Dockerfile"):
+        assert "@sha256:" in (STATE.parent / dockerfile).read_text(), dockerfile

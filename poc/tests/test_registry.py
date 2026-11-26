@@ -22,3 +22,17 @@ def test_a_write_is_visible_even_if_the_file_timestamp_does_not_change(tmp_path)
     reg.unregister("sbx1")
     os.utime(reg.path, ns=stamp)           # a coarse-timestamp filesystem: same mtime as before
     assert reg.lookup("10.0.0.1") is None  # the proxy must not keep trusting an unregistered caller
+
+
+def test_a_failed_write_leaves_no_temp_file_and_keeps_the_old_registry(tmp_path, monkeypatch):
+    import pytest
+    reg = Registry(tmp_path / "registry.json")
+    reg.register("10.0.0.1", Caller("s", "a", "t", 1), "sbx1")
+    def boom(*a, **kw):
+        raise OSError("disk full")
+    monkeypatch.setattr(os, "replace", boom)
+    with pytest.raises(OSError):
+        reg.register("10.0.0.2", Caller("s2", "a", "t", 1), "sbx2")
+    monkeypatch.undo()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["registry.json", "registry.json.lock"]
+    assert reg.lookup("10.0.0.1") and reg.lookup("10.0.0.2") is None

@@ -15,6 +15,7 @@ Layout: {"callers": {ip: {...Caller, "sandbox": name}}, "epochs": {session: newe
 """
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import json
 import os
@@ -47,10 +48,15 @@ class Registry:
             data = self._read()
             change(data)
             fd, tmp = tempfile.mkstemp(dir=self.path.parent)
-            with os.fdopen(fd, "w") as f:
-                json.dump(data, f)
-            os.chmod(tmp, 0o644)
-            os.replace(tmp, self.path)
+            try:
+                with os.fdopen(fd, "w") as f:
+                    json.dump(data, f)
+                os.chmod(tmp, 0o644)
+                os.replace(tmp, self.path)
+            except BaseException:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(tmp)
+                raise
 
     # -- controller side ---------------------------------------------------
 
@@ -73,6 +79,14 @@ class Registry:
 
     def newest_epoch(self, session: str) -> int:
         return self._read()["epochs"].get(session, 0)
+
+    def sandboxes(self, session: str) -> list[tuple[str, int]]:
+        """(sandbox name, epoch) for every sandbox registered to `session`."""
+        return [(c["sandbox"], c["epoch"]) for c in self._read()["callers"].values() if c["session"] == session]
+
+    def clear(self) -> None:
+        """Forget every caller (epochs are kept, so old executors stay fenced)."""
+        self._update(lambda data: data.update(callers={}))
 
     # -- proxy side --------------------------------------------------------
 

@@ -11,7 +11,10 @@ DIRS = ("registry", "audit", "stub", "proxy-conf")
 def up() -> None:
     for d in DIRS:
         (STATE / d).mkdir(parents=True, exist_ok=True)
-        (STATE / d).chmod(0o777)   # containers run as uid 65534
+        # Containers run as uid 65534, so the directories they write must be writable by it. The registry is
+        # different: the controller writes it and the proxy only reads it, and whoever can replace it decides
+        # which caller is which tenant, so it is not world-writable.
+        (STATE / d).chmod(0o755 if d == "registry" else 0o777)
     done = subprocess.run(["docker", "compose", "up", "-d", "--build", "--wait"], cwd=ROOT,
                           capture_output=True, text=True)
     if done.returncode:

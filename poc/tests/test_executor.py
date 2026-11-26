@@ -110,3 +110,27 @@ def test_an_unknown_agent_is_a_clear_error(tmp_path):
     from sandbox_controller import SandboxController
     with pytest.raises(ValueError, match="unknown agent"):
         AgentExecutor(SandboxController(), GRANTS, tmp_path / "log").run(Caller("s", "agent-typo", "tenant-a", 1), [], tmp_path / "wd")
+
+
+def test_a_cleanup_failure_does_not_discard_the_results(proxied, tmp_path, monkeypatch):
+    ctl, ex = _executor(proxied, tmp_path)
+    real_stop = ctl.stop
+    def failing_stop(sandbox):
+        real_stop(sandbox)
+        raise OSError("registry unwritable")
+    monkeypatch.setattr(ctl, "stop", failing_stop)
+    results = ex.run(Caller(f"s-cl-{uuid.uuid4().hex[:8]}", "agent-a", "tenant-a", 1), [ToolCall("bash", "echo ok")], tmp_path / "wd")
+    assert results[0]["result"]["stdout"] == "ok\n"                       # the work that was done is still returned
+    assert "cleanup failed" in results[-1]["result"]["error"]
+
+
+def test_a_sandbox_whose_stop_failed_is_not_marked_stopped(proxied, monkeypatch):
+    import pytest
+    ctl, sbx = proxied()
+    monkeypatch.setattr(proxied.registry, "unregister", lambda *a: (_ for _ in ()).throw(OSError("boom")))
+    with pytest.raises(OSError):
+        ctl.stop(sbx)
+    assert sbx.stopped is False          # so the executor knows to try again
+    monkeypatch.undo()
+    ctl.stop(sbx)
+    assert sbx.stopped is True
