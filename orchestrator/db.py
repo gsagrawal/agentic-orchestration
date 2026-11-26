@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     wait_deadline REAL,                       -- waiting expiry (unix seconds), set while waiting
     step_cap      INTEGER NOT NULL,           -- max tool calls for this session
     step_count    INTEGER NOT NULL DEFAULT 0, -- tool calls made so far
+    stop_reason   TEXT,                       -- 'step_cap' or 'run_limit', set when state is 'stopped'
     log_seq       INTEGER NOT NULL DEFAULT 0  -- number of log entries; next entry is log_seq + 1
 );
 

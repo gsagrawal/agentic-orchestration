@@ -93,7 +93,7 @@ class SessionRun:
         """Hand the session back if the loop has ended. Returns True if it did."""
         last = self.replay.last_action and self.replay.last_action["do"]
         if self.replay.stopped:
-            state_table.release(self.conn, self.session_id, self.epoch, "stopped")
+            state_table.release(self.conn, self.session_id, self.epoch, "stopped", stop_reason="step_cap")
         elif last == "finish":
             state_table.release(self.conn, self.session_id, self.epoch, "done")
         elif last == "wait":

@@ -98,7 +98,8 @@ swappable state plumbing) are implemented as specified and are not repeated here
 | 57 | Both deadlines are strict: a session exactly at its deadline is still live. | Inclusive. | One consistent rule; boundary tested for both. |
 | 58 | The executor enforces the step cap: when the model asks for a call beyond the cap, it logs `stopped` (reason `step_cap`) instead of the decision, and releases as `stopped`. | Log the decision, then refuse. | A logged tool decision with no result looks like a call in flight to the next executor and would be recovered (run). Not logging it keeps recovery correct. The cap allows exactly `step_cap` calls. |
 | 59 | `step_count` is updated in the same statement as the log entry that makes the call (`counts_as_step`). | A separate update, or derive it only from the log. | The count the manager reads cannot disagree with the log, and it costs no extra write. |
-| 60 | The waiting deadline is set by the executor when it releases the session (`release(..., wait_deadline)`). | The manager sets it later. | The executor is the one that knows the session started waiting, at one atomic transition. |
+| 60 | A `stop_reason` column (`step_cap` or `run_limit`) is set by both stop paths. | Reason only in the log. | The manager cannot write the log, so the run-limit stop would leave no reason; status must say why. |
+| 61 | The waiting deadline is set by the executor when it releases the session (`release(..., wait_deadline)`). | The manager sets it later. | The executor is the one that knows the session started waiting, at one atomic transition. |
 
 ## Open items (not yet decided or built)
 

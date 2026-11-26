@@ -36,7 +36,8 @@ def test_step_cap_stops_the_poison_script(conn, db_path, agents_path, clock):
     run_executor(ex, ticks=100)
 
     status = manager.get_status(sid)
-    assert (status["state"], status["executor_id"], status["step_count"]) == ("stopped", None, 5)
+    assert (status["state"], status["stop_reason"], status["executor_id"], status["step_count"]) == (
+        "stopped", "step_cap", None, 5)
     assert effect_counts(conn) == {(sid, n): 1 for n in range(1, 6)}  # exactly 5 calls were made
     last = session_log.read(conn, sid)[-1]
     assert (last["kind"], last["payload"]) == ("stopped", {"reason": "step_cap"})
@@ -133,7 +134,8 @@ def test_run_past_its_limit_is_stopped_and_its_executor_is_fenced(conn, db_path,
     state_table.heartbeat(conn, "ex-1", clock.now)  # the executor is healthy; the run is just too long
     manager.reconcile_once()
     status = manager.get_status(sid)
-    assert (status["state"], status["executor_id"], status["epoch"]) == ("stopped", None, 2)
+    assert (status["state"], status["stop_reason"], status["executor_id"], status["epoch"]) == (
+        "stopped", "run_limit", None, 2)
 
     # the executor was mid-run: its next write is rejected, and nothing it does lands
     run = ex.runs[sid]
@@ -150,5 +152,6 @@ def test_an_overdue_session_on_a_dead_executor_is_stopped_not_moved(conn, db_pat
     clock.now += 1000  # past the run limit AND past the lease
     state_table.heartbeat(conn, "ex-2", clock.now)  # a live executor that could have taken it
     manager.reconcile_once()
-    assert manager.get_status(sid)["state"] == "stopped"
+    status = manager.get_status(sid)
+    assert (status["state"], status["stop_reason"]) == ("stopped", "run_limit")
     assert state_table.assigned_to(conn, "ex-2") == []
