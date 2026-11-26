@@ -1,4 +1,4 @@
-.PHONY: test demo bench test-runtime test-integration demo-runtime
+.PHONY: test demo bench test-runtime test-integration demo-runtime bench-runtime
 test:
 	python3 -m pytest -q
 
@@ -19,3 +19,7 @@ test-integration:
 # Needs the Temporal dev server, which the temporalio SDK downloads on first use.
 demo-runtime:
 	python3 -m scripts.runtime_demo
+
+# Throughput and recovery measurements (writes markdown to stdout; takes several minutes).
+bench-runtime:
+	python3 -m scripts.runtime_bench

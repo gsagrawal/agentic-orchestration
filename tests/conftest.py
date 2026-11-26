@@ -61,7 +61,7 @@ async def dev_env():
 
 @pytest.fixture
 def workers(dev_env, tmp_path):
-    from tests.helpers_runtime import WorkerProcesses
+    from agent_runtime.harness import WorkerProcesses
 
     w = WorkerProcesses(dev_env.client.service_client.config.target_host, tmp_path)
     yield w

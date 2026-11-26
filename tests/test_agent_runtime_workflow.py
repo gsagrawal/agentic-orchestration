@@ -119,3 +119,10 @@ async def test_model_is_told_when_the_sandbox_was_recreated(env, tool_service, t
     notices = [m for m in result.history if m["role"] == "system"]
     assert [m["content"] for m in notices] == [SANDBOX_RECREATED]
     assert any(m.get("content") == SANDBOX_RECREATED for m in model.seen[-1].history)  # the model saw it
+
+
+async def test_an_unknown_model_action_fails_the_session_instead_of_retrying_forever(run_session):
+    from temporalio.client import WorkflowFailureError
+
+    with pytest.raises(WorkflowFailureError):
+        await run_session(agent([{"do": "dance"}]))

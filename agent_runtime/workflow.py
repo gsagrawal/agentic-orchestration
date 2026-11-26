@@ -13,6 +13,7 @@ from datetime import timedelta
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import ApplicationError
 
 with workflow.unsafe.imports_passed_through():
     from agent_runtime.activities import Activities
@@ -112,7 +113,8 @@ class AgentSession:
                         break
                     continue  # stopped while waiting: the boundary above ends the session
                 if action["do"] != "tool":
-                    raise ValueError(f"unsupported action {action['do']!r}")
+                    # A plain exception would make Temporal retry the task forever; this fails the session.
+                    raise ApplicationError(f"unsupported action {action['do']!r}", non_retryable=True)
 
                 spec = specs.get(action["tool"])
                 if spec is None or spec.grant not in agent.grants:

@@ -17,6 +17,7 @@ SQLite (stdlib) is shared by several processes: one connection per call, WAL mod
 and BEGIN IMMEDIATE so the check-and-write steps are atomic across processes.
 """
 import json
+import os
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -32,7 +33,7 @@ CREATE TABLE IF NOT EXISTS calls (
     started         INTEGER NOT NULL DEFAULT 0,   -- the "started" marker
     result          TEXT                          -- JSON; NULL until recorded
 );
-CREATE TABLE IF NOT EXISTS attempts (id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT, attempt INTEGER, at REAL);
+CREATE TABLE IF NOT EXISTS attempts (id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT, attempt INTEGER, at REAL, pid INTEGER);
 CREATE TABLE IF NOT EXISTS fenced (id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT, attempt INTEGER);
 CREATE TABLE IF NOT EXISTS effects (              -- the ledger; append-only
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -75,6 +76,11 @@ class EffectsLedger:
     def count(self, key: str) -> int:
         with txn(self._path) as c:
             return c.execute("SELECT COUNT(*) FROM effects WHERE key = ?", (key,)).fetchone()[0]
+
+    def counts(self) -> dict[str, int]:
+        """Effects per key, for every key that has any."""
+        with txn(self._path) as c:
+            return dict(c.execute("SELECT key, COUNT(*) FROM effects GROUP BY key").fetchall())
 
     def duplicates(self) -> list[str]:
         """Keys with more than one effect. The chaos invariant is that this is empty."""
@@ -142,7 +148,7 @@ class ToolService:
                     decision, stored = "unknown", None
                 else:
                     decision, stored = "run", None  # marker + idempotent tool: run again
-            c.execute("INSERT INTO attempts (key, attempt, at) VALUES (?, ?, ?)", (key, attempt, time.time()))
+            c.execute("INSERT INTO attempts (key, attempt, at, pid) VALUES (?, ?, ?, ?)", (key, attempt, time.time(), os.getpid()))
         return decision, stored
 
     def _reject(self, key: str, attempt: int, where: str):
@@ -157,8 +163,11 @@ class ToolService:
 
     def attempts(self, key: str) -> list[tuple[int, float]]:
         """(attempt, wall-clock time) for every call that passed the fence; used to time recovery."""
+        return [(a, at) for a, at, _ in self.attempts_with_pid(key)]
+
+    def attempts_with_pid(self, key: str) -> list[tuple[int, float, int]]:
         with txn(self._path) as c:
-            return [(r[0], r[1]) for r in c.execute("SELECT attempt, at FROM attempts WHERE key = ? ORDER BY id", (key,))]
+            return [tuple(r) for r in c.execute("SELECT attempt, at, pid FROM attempts WHERE key = ? ORDER BY id", (key,))]
 
     def state(self, key: str) -> str:
         """'none' (no marker), 'started' (marker, no result) or 'done' (result stored)."""

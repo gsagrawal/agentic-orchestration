@@ -5,7 +5,6 @@ branch on a tool's name. Component: part of the tool service / agent definition.
 """
 import time
 from dataclasses import dataclass
-from typing import Callable
 
 
 @dataclass(frozen=True)
@@ -15,11 +14,6 @@ class ToolSpec:
     idempotent: bool  # True: the backend dedupes on the key, so re-running is safe
     timeout_s: float
     grant: str  # the permission an agent version must hold to call this tool
-
-
-# An effect function does the tool's real work. It receives the effects ledger
-# so the work is recorded; it returns the tool's result value (JSON-able).
-EffectFn = Callable[["EffectsLedger", str, int, dict], dict]
 
 
 class FakeTools:

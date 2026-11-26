@@ -46,3 +46,76 @@ Running list. Each entry: what I chose, what I rejected.
     stop signal (step 5).
 17. **Demo/test targets are named `*-runtime`** because `make test` and `make demo` still run the
     older `orchestrator/` code. To be unified if that code is removed.
+
+## Steps 4-5: session manager, signals, API
+
+18. **Quota counts running sessions, and a slot is freed lazily.** At admission the manager asks
+    Temporal which of the tenant's "active" rows have closed, then counts. Bounded by the quota.
+    Rejected: an activity at the end of the workflow that writes to the manager's table (couples the
+    workflow to the manager, and a timed-out workflow would never run it).
+19. **Check and insert in one `BEGIN IMMEDIATE` transaction.** Two concurrent starts cannot both
+    take the last slot. Rejected: check then insert (race).
+20. **Ingress is faked by trusting `X-Tenant` / `X-User` headers.** ASSUMPTION: a real ingress sets
+    them after authenticating. "Responder" = only the user who started the session (ASSUMPTION; a
+    real system would have a responders list). The same user check covers reply, message and stop.
+21. **Another tenant's session answers 404, not 403.** It must not reveal that the id exists.
+22. **API codes:** unknown or other tenant 404, wrong user 403, ended session 410 ("gone"),
+    reply for a step that is not open 409, accepted 202. A reply for the wrong step is refused at the
+    API *and* dropped by the workflow, because the step can close between the API's check and its signal.
+23. **Signal handlers only record state; the loop acts at the step boundary.** That is what makes
+    "a tool call in flight is never interrupted" true by construction. Rejected: acting inside the
+    handler (would race with the loop).
+24. **`open_step` is set before the notification activity.** A reply that arrives while the
+    notification is still being sent is kept, not lost. Rejected: set it after (reply lost in the gap).
+25. **Message de-duplication is by a client-chosen `message_id` held in workflow state** and carried
+    across continue-as-new.
+26. **Stop while waiting for a human ends the session at once** (the wait is a step boundary).
+
+## Step 6: crash handling
+
+27. **Heartbeats from the event loop while the tool runs in a thread.** Heartbeat timeout 3 s,
+    interval 1 s: ASSUMPTIONS for tests, not tuned. Rejected: no heartbeats (a dead worker would be
+    noticed only at the tool's start-to-close timeout, 10-30 s here).
+28. **Fault injection through environment variables** (`fault.py`): the worker process kills or
+    freezes itself at a named point, once. Rejected: only killing from outside (cannot hit "after the
+    effect, before the result" reliably). Both are tested: the outside `kill -9` while the tool service
+    shows the call started, and the hooks for the exact points.
+29. **Sticky-queue timeout set to 2 s in the worker.** Measured on the first crash tests: each took
+    about 14.5 s of wall time with the SDK default (10 s) and about 6.5 s with 2 s. After a worker
+    dies, the next workflow task for a session it cached waits that long on its private queue.
+    Trade-off: a briefly slow worker loses its cache sooner.
+30. **The zombie test uses SIGSTOP/SIGCONT.** The frozen worker's pending poll is also handed the
+    retry (and cannot run it), so the zombie is typically fenced twice (attempts 1 and 2) before
+    attempt 3 does the work. The test asserts "every zombie attempt is lower than the winner and was
+    rejected", not an exact list.
+31. **"Sandbox recreated" is detected in the workflow**, by remembering that a sandbox was created
+    before and `ensure_sandbox` now reports `created=True`. The model sees a system message.
+
+## Step 7: timers and caps
+
+32. **Active-run limit = workflow execution timeout, as specified, but it is a lifetime limit.**
+    Temporal counts it from the session's start, including time waiting for a human and across
+    continue-as-new. So `wait_expiry_s` must be below `active_limit_s` or the wait cannot expire.
+    This is a real tension in decision 9; flagged, not redesigned.
+33. **A session stopped by the execution timeout runs no cleanup**, so its sandbox is not stopped by
+    the workflow. A real sandbox controller has its own deadline as a hard kill (architecture doc);
+    here the fake would leak. See gaps in the README.
+34. **Continue-as-new at a step boundary after `continue_after_steps` steps in one run**, carrying
+    history, step number, message ids and sandbox flags. The sandbox is kept (the `finally` skips
+    `stop_sandbox` when continuing). Step numbers continue, so idempotency keys stay unique.
+35. **Test environment per test.** A session left running by one test stalls time skipping in all
+    later tests on a shared server (found when a quota test left workerless sessions). Cost: a few
+    hundred ms per test.
+36. **Time skipping unlocks only for the handle `start_workflow` returned.** Tests that start
+    through the manager skip time explicitly with `env.sleep`.
+
+## Step 8: chaos and measurements
+
+37. **Chaos uses SIGKILL only.** A killed process cannot act after the kill. Zombies (SIGSTOP) are
+    tested separately, in the one window the fence covers (see gaps).
+38. **The chaos test checks it is not vacuous:** at least 2 kills and at least one tool call that
+    needed a second attempt. A first version with short tool calls passed with zero retries.
+39. **The invariant checker has its own tests that feed it broken states** (duplicate effect,
+    unrecorded effect, wrong "ok", leaked sandbox...), so it is known to be able to fail.
+40. **Benchmark numbers are printed by the script from the run that produced them.** One machine,
+    everything shared (dev server, workers, client). No numbers are written by hand.
