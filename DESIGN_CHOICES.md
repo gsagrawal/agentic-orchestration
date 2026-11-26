@@ -36,3 +36,23 @@ Open item (decide in step 7): `append()` checks only the epoch, so the last hold
 | 18 | A key reused with a different tool or args raises `KeyConflict`. | Silently return the stored result. | The step number is replayed deterministically from the log, so a mismatch means a bug; failing loudly beats returning a wrong result. |
 | 19 | The effects ledger has no unique constraint and is append-only (triggers). | Unique on (session, step). | A unique constraint would reject the second effect instead of recording it, hiding exactly what the tests must detect. |
 | 20 | `fault_hook(point)` with points `before_effect` / `after_effect`. | Sleep-and-hope timing in tests. | Deterministic: tests (and later real `kill -9`) land at exactly the window being tested. |
+
+## Step 3: executor
+
+| # | Choice | Rejected alternative | Why |
+|---|--------|----------------------|-----|
+| 21 | Dispatch is the state table: `assign()` writes `executor_id`, the executor polls `assigned_to()`. | A queue or socket per executor. | One mechanism (the table) for dispatch, liveness and recovery; nothing extra to lose on a crash. Cost: polling (20 ms default). |
+| 22 | The scripted model is a pure function of the messages; its script position is the number of assistant messages in the history. | Keep a script cursor in executor memory or in the state table. | The executor stays stateless: replay alone restores the position, as it would for a real LLM. |
+| 23 | The log has two entry kinds for the loop: `model` (the decision, written BEFORE the tool runs) and `tool_result`. A `model` tool entry with no result after it is "a call in flight". | Log one entry after the tool returns. | Writing the decision first is what lets a resumed executor see that a call may have started. Step 6 depends on it. |
+| 24 | One `Replay.apply()` serves replayed and live entries. | Separate replay and live code paths. | A resumed session cannot drift from an uninterrupted one. |
+| 25 | A worker takes turns across its sessions, one loop iteration each, in a single thread. | A thread or process per session. | No threads, no shared connection problems. Cost: a slow tool delays the worker's other sessions (known, see README gaps). |
+| 26 | Step number = count of tool calls in the log (1-based). Idempotency key = `<session>:<step>`. | A separate counter. | Derived from the log, so it cannot disagree with it. |
+| 27 | `finish`/`wait` are logged, then the session is released in the same iteration; if the executor dies between, the next one sees the last action and releases. | Release first. | Log first means the log never lags the state table. |
+| 28 | `release()` is fenced by epoch and by `state='running'`; the executor catches `StaleEpoch`, forgets the session and carries on. | Crash the worker on a fencing error. | Being fenced is normal after reassignment, not a failure. |
+| 29 | Resume with a tool call in flight raises `NotImplementedError` until step 6. | Retry the call (unsafe for non-idempotent tools). | Fail closed. Labelled as a placeholder in code and tests; step 6 replaces it. |
+| 30 | `agent_id`/`agent_version` columns pin the definition at admission; the agent store is a JSON file. | Look up "latest" on each pickup. | Pinning is required by the architecture: edits must not change running sessions. |
+| 31 | Workers are `multiprocessing` "spawn" processes. | "fork". | A forked child would inherit the parent's open SQLite connections. |
+
+Open items from step 3 review:
+- An unexpected exception (bad agent id, unknown tool, the step-6 placeholder) kills the whole worker, and every session on it. Deliberate for now: swallowing it would make a broken session spin silently. Revisit with the reconciler (step 5) and caps (step 7).
+- A resumed `waiting` session would be released again immediately. Step 7 must add a human-response log entry and make `advance()` check for it before releasing.
