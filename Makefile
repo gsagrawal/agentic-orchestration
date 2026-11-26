@@ -3,7 +3,7 @@ test:
 	python3 -m pytest -q
 
 demo:
-	python3 scripts/demo.py
+	python3 -m scripts.demo
 
 bench:
-	python3 scripts/bench.py
+	python3 -m scripts.bench

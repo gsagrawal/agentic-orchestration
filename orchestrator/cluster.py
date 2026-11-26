@@ -28,6 +28,13 @@ class Cluster:
         self.manager_error: Exception | None = None
 
     def __enter__(self):
+        try:
+            return self._start()
+        except BaseException:
+            self.__exit__()  # do not leave the thread and workers running if start-up fails
+            raise
+
+    def _start(self):
         init_db(self.db_path)
         self.conn = connect(self.db_path)
         self.manager = SessionManager(self.db_path, AgentStore(self.agents_path), self.config)
@@ -41,7 +48,8 @@ class Cluster:
 
     def __exit__(self, *exc):
         self._stop.set()
-        self._thread.join()
+        if hasattr(self, "_thread"):
+            self._thread.join()
         for proc in self.workers.values():
             proc.kill()
             proc.join()
@@ -52,7 +60,7 @@ class Cluster:
             while not self._stop.is_set():
                 manager.reconcile_once()
                 self._stop.wait(self.reconcile_interval)
-        except Exception as e:  # surfaced by wait_for, so a dead manager fails the run loudly
+        except Exception as e:  # surfaced by check_manager
             self.manager_error = e
 
     def spawn_executor(self) -> str:
@@ -86,11 +94,15 @@ class Cluster:
         query = f"SELECT COUNT(*) FROM sessions WHERE state NOT IN ({marks})"
         return self.conn.execute(query, TERMINAL_STATES).fetchone()[0] == 0
 
+    def check_manager(self) -> None:
+        """Raise if the reconcile loop has died, so a broken manager fails the run loudly."""
+        if self.manager_error:
+            raise AssertionError(f"the manager loop died: {self.manager_error!r}")
+
     def wait_for(self, condition, what: str, timeout: float = 60.0) -> None:
         deadline = time.time() + timeout
         while not condition():
-            if self.manager_error:
-                raise AssertionError(f"the manager loop died: {self.manager_error!r}")
+            self.check_manager()
             if time.time() > deadline:
                 raise AssertionError(f"timed out waiting for {what}")
             time.sleep(0.02)

@@ -1,17 +1,15 @@
-"""make demo: admit sessions, kill an executor in the middle of tool calls, show the outcome."""
+"""make demo (python3 -m scripts.demo): admit sessions, kill an executor in the middle of tool calls, show the outcome."""
 
 import sys
 import tempfile
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from orchestrator import invariants  # noqa: E402
-from orchestrator.cluster import Cluster  # noqa: E402
-from orchestrator.errors import QuotaExceeded  # noqa: E402
-from orchestrator.session_manager import ManagerConfig  # noqa: E402
-from orchestrator.tool_service import effect_counts  # noqa: E402
+from orchestrator import invariants
+from orchestrator.cluster import Cluster
+from orchestrator.errors import QuotaExceeded
+from orchestrator.session_manager import ManagerConfig
+from orchestrator.tool_service import effect_counts
 
 AGENTS = str(Path(__file__).parent / "agents.json")
 # Short timers so the demo takes seconds (assumptions, not recommendations).
@@ -51,7 +49,8 @@ def main():
         print("\nsession   agent      end state  epoch  steps  note")
         for row in cluster.conn.execute("SELECT * FROM sessions ORDER BY rowid"):
             _, agent = agents[row["id"]]
-            note = row["stop_reason"] or ("moved after the kill" if row["id"] in stranded else "")
+            notes = ["moved after the kill"] if row["id"] in stranded else []
+            note = ", ".join(notes + ([f"stopped: {row['stop_reason']}"] if row["stop_reason"] else []))
             print(f"{row['id'][:8]}  {agent:<10} {row['state']:<10} {row['epoch']:<6} {row['step_count']:<6} {note}")
 
         effects = effect_counts(cluster.conn)

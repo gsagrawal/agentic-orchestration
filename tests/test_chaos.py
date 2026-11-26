@@ -60,7 +60,7 @@ def test_random_executor_kills_never_break_the_invariants(tmp_path, seed):
                     thaw_at[executor_id] = now + rng.uniform(0.9, 1.5)  # longer than the lease
                     freezes += 1
                 next_event = now + rng.uniform(0.1, 0.4)
-            cluster.wait_for(lambda: True, "")  # raises if the manager loop died
+            cluster.check_manager()
             time.sleep(0.02)
             assert time.time() < started + 90, "sessions did not all end"
 

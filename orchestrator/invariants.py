@@ -29,10 +29,10 @@ def check(conn: sqlite3.Connection) -> list[str]:
             problems.append(f"{sid}: stopped without a reason")
         if s["step_count"] > s["step_cap"]:
             problems.append(f"{sid}: {s['step_count']} steps exceeds the cap of {s['step_cap']}")
-        problems += _epoch_problems(sid, s["epoch"], session_log.read(conn, sid),
-                                    [r[0] for r in conn.execute(
-                                        "SELECT epoch FROM effects WHERE session_id = ? ORDER BY id", (sid,))])
-        problems += _log_shape_problems(sid, session_log.read(conn, sid))
+        log = session_log.read(conn, sid)
+        effect_epochs = [r[0] for r in conn.execute("SELECT epoch FROM effects WHERE session_id = ? ORDER BY id", (sid,))]
+        problems += _epoch_problems(sid, s["epoch"], log, effect_epochs)
+        problems += _log_shape_problems(sid, log)
     for r in conn.execute("SELECT session_id, step, epoch, session_epoch FROM effects WHERE epoch != session_epoch"):
         problems.append(f"{r['session_id']} step {r['step']}: effect by epoch {r['epoch']} "
                         f"committed while the session was at epoch {r['session_epoch']}")

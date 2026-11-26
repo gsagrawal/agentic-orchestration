@@ -1,4 +1,4 @@
-"""make bench: measure throughput and the time from executor death to a resumed session.
+"""make bench (python3 -m scripts.bench): measure throughput and the time from executor death to a resumed session.
 
 Prints the machine and every setting, because the numbers mean nothing without them.
 Each number is measured on this machine in this run; nothing is estimated.
@@ -10,15 +10,12 @@ import platform
 import random
 import sqlite3
 import statistics
-import sys
 import tempfile
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from orchestrator.cluster import Cluster  # noqa: E402
-from orchestrator.session_manager import ManagerConfig  # noqa: E402
+from orchestrator.cluster import Cluster
+from orchestrator.session_manager import ManagerConfig
 
 AGENTS = str(Path(__file__).parent / "agents.json")
 THROUGHPUT_DELAYS = (0.01, 0.0)  # seconds per fake tool call (spent again on the way back for send_email)
@@ -28,7 +25,8 @@ EXECUTOR_COUNTS = (1, 2, 4, 8)
 
 
 def machine() -> str:
-    cpu = next((l.split(":")[1].strip() for l in open("/proc/cpuinfo") if l.startswith("model name")), "unknown")
+    with open("/proc/cpuinfo") as f:
+        cpu = next((line.split(":")[1].strip() for line in f if line.startswith("model name")), "unknown")
     return f"{cpu}, {os.cpu_count()} logical CPUs, {platform.system()} {platform.release()}, " \
            f"Python {platform.python_version()}, SQLite {sqlite3.sqlite_version}"
 
