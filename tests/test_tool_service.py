@@ -161,7 +161,7 @@ def test_non_idempotent_result_is_recorded_even_if_the_epoch_changed_in_the_wind
     assert effect_counts(conn) == {("s1", 1): 1}
 
 
-def test_KNOWN_LIMIT_call_alone_reruns_a_non_idempotent_tool_that_has_no_stored_result(conn, db_path, epoch):
+def test_known_limit_call_alone_reruns_a_non_idempotent_tool_that_has_no_stored_result(conn, db_path, epoch):
     """Not a feature: pins the contract that the EXECUTOR must not call again after a crash
     in the window (step 6). The service on its own is not safe here (DESIGN_CHOICES #17)."""
     class Died(Exception):

@@ -34,8 +34,8 @@ class Replay:
 
     def __init__(self):
         self.messages: list[dict] = []
-        self.tool_steps = 0          # tool calls started so far; also the next call's step number
-        self.pending_step: int | None = None  # a tool call logged but with no result yet
+        self.tool_steps = 0                   # tool calls started so far; the latest call's step number
+        self.call_in_flight = False           # the latest tool call is logged but has no result yet
         self.last_action: dict | None = None  # the model's latest decision
 
     def apply(self, kind: str, payload: dict) -> None:
@@ -45,10 +45,10 @@ class Replay:
             self.last_action = action
             if action["do"] == "tool":
                 self.tool_steps += 1
-                self.pending_step = self.tool_steps
+                self.call_in_flight = True
         elif kind == "tool_result":
             self.messages.append({"role": "tool", "step": payload["step"], "content": payload["result"]})
-            self.pending_step = None
+            self.call_in_flight = False
 
 
 class SessionRun:
@@ -66,7 +66,7 @@ class SessionRun:
     def advance(self) -> bool:
         """Run one loop iteration. Returns True once the session has left this executor."""
         r = self.replay
-        if r.pending_step is not None:
+        if r.call_in_flight:
             # A call was logged but has no result: we are resuming mid-call.
             # Step 6 decides what to do. Until then, fail closed rather than guess.
             raise NotImplementedError("resume with a tool call in flight is built in step 6")
