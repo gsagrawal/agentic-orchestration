@@ -10,7 +10,6 @@ what the model is shown). Part 2 uses real OS processes and a real SIGKILL.
 """
 
 import signal
-import time
 
 import pytest
 

@@ -163,18 +163,21 @@ class Executor:
     def tick(self) -> int:
         """Give every assigned session one iteration. Returns how many sessions were assigned.
 
-        The heartbeat is sent from here, between iterations, on purpose: it says "the loop
-        is alive", not "the process exists". A single long iteration delays it.
+        The heartbeat is sent from here, between iterations (not from a thread), on purpose: it
+        says "the loop is alive", not "the process exists". So the longest silence is one
+        iteration, however many sessions this executor holds.
         """
-        self._heartbeat_if_due()
         assigned = dict(state_table.assigned_to(self.conn, self.executor_id))
         # Forget sessions that moved away, or that came back at a newer epoch (replay again).
         for sid in [s for s, run in self.runs.items() if assigned.get(s) != run.epoch]:
             del self.runs[sid]
+        self._heartbeat_if_due()
         for sid, epoch in assigned.items():
+            self._heartbeat_if_due()
             try:
                 if sid not in self.runs:
-                    self.runs[sid] = SessionRun(self.conn, self.tools, self.model, self.agents, sid, epoch, self.fault_hook, self.clock)
+                    self.runs[sid] = SessionRun(
+                        self.conn, self.tools, self.model, self.agents, sid, epoch, self.fault_hook, self.clock)
                 if self.runs[sid].advance():
                     del self.runs[sid]
             except StaleEpoch:

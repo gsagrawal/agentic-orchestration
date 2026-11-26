@@ -4,7 +4,8 @@
 the effect and the stored result are recorded together and a retry is always
 safe. A non-idempotent tool has a window between the effect and the stored
 result; a crash inside it leaves an effect with no recorded result.
-`delay` (seconds) is spent before the effect so a kill can land mid-call.
+`delay` (seconds) is spent before the effect, and for a non-idempotent tool again before
+its result is stored, so a kill or a freeze can land mid-call.
 """
 
 from dataclasses import dataclass

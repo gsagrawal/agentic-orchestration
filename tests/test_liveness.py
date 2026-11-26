@@ -7,6 +7,7 @@ import pytest
 from orchestrator import session_log, state_table
 from orchestrator.agent_store import AgentStore
 from orchestrator.executor import Executor, start_worker
+from orchestrator.scripted_model import ScriptedModel
 from orchestrator.session_manager import ManagerConfig, SessionManager
 from orchestrator.tool_service import effect_counts
 from tests.helpers import Clock, wait_until
@@ -37,6 +38,25 @@ def test_executor_registers_and_then_heartbeats_no_more_often_than_its_interval(
     clock.now = 1000.6
     ex.tick()
     assert last_heartbeat(conn, "ex-1") == 1000.6
+
+
+def test_an_executor_with_many_sessions_heartbeats_between_them(conn, db_path, agents_path, clock):
+    """Each iteration takes 1 s of (fake) time. The heartbeat must not wait for the whole
+    sweep over its sessions, or a busy but healthy executor would look dead."""
+    class SlowModel(ScriptedModel):
+        def decide(self, agent, messages):
+            clock.now += 1.0
+            return super().decide(agent, messages)
+
+    ex = Executor(db_path, agents_path, "ex-1", clock=clock, heartbeat_interval=0.5, model=SlowModel())
+    for i in range(3):
+        sid = f"s{i}"
+        state_table.create_session(conn, sid, "t", step_cap=10, agent_id="two-tools", agent_version=1)
+        state_table.assign(conn, sid, "ex-1")
+    start = clock.now
+    ex.tick()  # three iterations: the clock ends 3 s later
+    assert clock.now == start + 3.0
+    assert last_heartbeat(conn, "ex-1") == start + 2.0  # sent before the third session's iteration
 
 
 @pytest.mark.parametrize("age, still_alive", [(LEASE, True), (LEASE + 0.01, False)])

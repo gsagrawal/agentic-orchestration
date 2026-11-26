@@ -69,15 +69,18 @@ class ToolService:
             if stored is not None:
                 return stored
             effect_id = self._conn.execute(
-                "INSERT INTO effects (session_id, step, tool, epoch) VALUES (?, ?, ?, ?)",
-                (session_id, step, tool_name, epoch),
+                "INSERT INTO effects (session_id, step, tool, epoch, session_epoch) "
+                "VALUES (?, ?, ?, ?, (SELECT epoch FROM sessions WHERE id = ?))",
+                (session_id, step, tool_name, epoch, session_id),
             ).lastrowid
             result = tool.run(args, effect_id)
             if tool.idempotent:
                 self._store(key, session_id, step, tool_name, args_json, result)
                 return result
 
-        # Non-idempotent: the effect is committed but the result is not yet recorded.
+        # Non-idempotent: the effect is committed but the result is not yet recorded. The
+        # response takes as long to come back as the request took to go, so spend the delay here too.
+        time.sleep(tool.delay)
         self._fault("after_effect")
         # Stored whatever the epoch now is: the effect happened, and recording the
         # truth lets a later lookup find it. A zombie's own log append is still fenced.

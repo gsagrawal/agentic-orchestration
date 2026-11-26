@@ -97,7 +97,8 @@ def stop_overdue_runs(conn: sqlite3.Connection, now: float) -> list[str]:
     return [r["id"] for r in rows]
 
 
-LIVE_STATES = ("created", "running", "waiting")  # everything that is not terminal
+LIVE_STATES = ("created", "running", "waiting")
+TERMINAL_STATES = ("done", "cancelled", "expired", "stopped")  # never change again
 
 
 def count_live(conn: sqlite3.Connection, tenant: str) -> int:
