@@ -1,0 +1,54 @@
+# The always-on parts: agent-network-proxy, the GitHub stub, and the two networks.
+# Sandboxes are NOT here: sandbox-controller creates them on demand.
+name: agentpoc
+
+x-hardened: &hardened
+  image: agent-proxy:poc
+  user: "65534:65534"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  tmpfs: [/tmp]
+  environment: {HOME: /tmp}
+
+services:
+  proxy:
+    <<: *hardened
+    build:
+      context: .
+      dockerfile: agent_network_proxy/Dockerfile
+      secrets: [cabundle]
+    command: >
+      mitmdump --listen-host 0.0.0.0 --listen-port 8080 --set confdir=/conf
+      --set ssl_verify_upstream_trusted_ca=/stub/cert.pem -s /app/agent_network_proxy/addon.py
+    volumes:
+      - ./config:/config:ro                # grants + secrets: mounted here and nowhere else
+      - ./.state/registry:/registry:ro     # written by sandbox-controller
+      - ./.state/audit:/audit
+      - ./.state/stub:/stub:ro             # the stub's public cert, so the proxy verifies its upstream
+      - ./.state/proxy-conf:/conf          # the proxy's CA; the private key never leaves this container
+    networks: [internal, upstream]
+    depends_on:
+      stub: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, python, -c, "import socket; socket.create_connection(('127.0.0.1', 8080), 2)"]
+      interval: 1s
+      retries: 30
+
+  stub:
+    <<: *hardened
+    command: python /app/stubs/github_stub.py
+    volumes: [./.state/stub:/stub]
+    networks:
+      upstream: {aliases: [api.github.test]}
+    healthcheck:
+      test: [CMD, python, -c, "import socket; socket.create_connection(('127.0.0.1', 443), 2)"]
+      interval: 1s
+      retries: 30
+
+networks:
+  internal: {internal: true}   # no route off this network: this is what boxes a sandbox in
+  upstream: {}
+
+secrets:
+  cabundle: {file: "${BUILD_CA_BUNDLE:-/dev/null}"}

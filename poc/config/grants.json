@@ -1,0 +1,16 @@
+{
+  "tenants": {
+    "tenant-a": {"rate_limit": {"requests": 100, "per_seconds": 60}},
+    "tenant-b": {"rate_limit": {"requests": 100, "per_seconds": 60}},
+    "tenant-c": {"rate_limit": {"requests": 3, "per_seconds": 5}}
+  },
+  "agents": {
+    "agent-a": {"tenant": "tenant-a", "tools": ["bash", "python"],
+      "destinations": {"api.github.test": {"credential": "github", "env_var": "GH_TOKEN", "placeholder": "placeholder-github-token"}}},
+    "agent-b": {"tenant": "tenant-b", "tools": ["bash", "python"],
+      "destinations": {"api.github.test": {"credential": "github", "env_var": "GH_TOKEN", "placeholder": "placeholder-github-token"}}},
+    "agent-c": {"tenant": "tenant-c", "tools": ["bash", "python"],
+      "destinations": {"api.github.test": {"credential": "github", "env_var": "GH_TOKEN", "placeholder": "placeholder-github-token"}}},
+    "agent-no-net": {"tenant": "tenant-a", "tools": ["bash"], "destinations": {}}
+  }
+}

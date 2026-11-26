@@ -1,0 +1,101 @@
+"""Network: the sandbox reaches only the proxy, and the proxy enforces who, where, and how often."""
+import subprocess
+import time
+
+from conftest import AUDIT_LOG, STATE, STUB_LOG, fetch, lines, py
+from agent_network_proxy.registry import Caller
+
+GITHUB = "https://api.github.test/user"
+
+
+def _stub_ip():
+    fmt = '{{(index .NetworkSettings.Networks "agentpoc_upstream").IPAddress}}'
+    return subprocess.run(["docker", "inspect", "-f", fmt, "agentpoc-stub-1"],
+                          capture_output=True, text=True, check=True).stdout.strip()
+
+
+def test_direct_request_to_the_stub_fails(proxied):
+    ctl, sbx = proxied()
+    before = len(lines(STUB_LOG))
+    r = py(ctl, sbx, f"import socket; socket.create_connection(('{_stub_ip()}', 443), 3)")
+    assert r.exit_code != 0 and "unreachable" in r.stderr.lower()
+    assert len(lines(STUB_LOG)) == before
+
+
+def test_no_route_to_the_internet_and_no_dns(proxied):
+    ctl, sbx = proxied()
+    assert py(ctl, sbx, "import socket; socket.create_connection(('1.1.1.1', 443), 3)").exit_code != 0
+    assert py(ctl, sbx, "import socket; socket.getaddrinfo('api.github.test', 443)").exit_code != 0
+
+
+def test_the_proxy_is_reachable_and_forwards_granted_traffic(proxied):
+    ctl, sbx = proxied()
+    assert fetch(ctl, sbx, GITHUB).stdout.startswith("200 ")
+
+
+def test_destination_not_in_grants_is_denied(proxied):
+    ctl, sbx = proxied()
+    out = fetch(ctl, sbx, "https://evil.test/steal").stdout
+    assert "403" in out
+    deny = [l for l in lines(AUDIT_LOG) if l["host"] == "evil.test"][-1]
+    assert (deny["decision"], deny["reason"], deny["session"]) == ("deny", "destination not granted", sbx.caller.session)
+
+
+def test_agent_with_no_grants_cannot_reach_anything(proxied):
+    ctl, sbx = proxied(agent="agent-no-net")
+    assert "403" in fetch(ctl, sbx, GITHUB).stdout
+
+
+def test_caller_is_identified_by_address_not_by_claims(proxied):
+    ctl, sbx = proxied()
+    # The request claims to be another tenant/session; the proxy must still use the source address.
+    code = ("import urllib.request as u\n"
+            "r=u.Request('https://api.github.test/user',headers={'X-Tenant':'tenant-b','X-Session':'other'})\n"
+            "print(u.urlopen(r,timeout=8).status)")
+    assert py(ctl, sbx, code).stdout.strip() == "200"
+    last = [l for l in lines(AUDIT_LOG) if l["decision"] == "allow"][-1]
+    assert last["tenant"] == "tenant-a" and last["session"] == sbx.caller.session
+
+
+def test_rate_limit_is_per_tenant_and_a_window(proxied):
+    ctl, sbx = proxied(agent="agent-c", tenant="tenant-c")         # limit: 3 requests / 5 s
+    outs = [fetch(ctl, sbx, GITHUB).stdout for _ in range(5)]
+    assert all(o.startswith("200 ") for o in outs[:3])
+    assert all("HTTPError 429" in o for o in outs[3:])
+    ctl_a, a = proxied()                                            # another tenant is unaffected
+    assert fetch(ctl_a, a, GITHUB).stdout.startswith("200 ")
+    time.sleep(5.5)
+    assert fetch(ctl, sbx, GITHUB).stdout.startswith("200 ")
+
+
+def test_new_epoch_stops_the_old_sandbox(proxied):
+    ctl, old = proxied(session="fence", epoch=1)
+    _, new = proxied(session="fence", epoch=2)
+    assert not old.alive and new.alive
+    assert subprocess.run(["docker", "inspect", old.name], capture_output=True).returncode != 0
+    callers = proxied.registry._read()["callers"]
+    assert [c["epoch"] for c in callers.values() if c["session"] == new.caller.session] == [2]
+
+
+def test_stale_epoch_cannot_start_a_sandbox(proxied):
+    import pytest
+    from sandbox_controller import SandboxError
+    ctl, current = proxied(session="stale", epoch=5)
+    with pytest.raises(SandboxError, match="stale epoch"):
+        ctl.create(STATE / "x", Caller(current.caller.session, "agent-a", "tenant-a", 4))
+
+
+def test_zombie_with_a_stale_epoch_is_rejected_by_the_proxy(proxied):
+    # Simulates the controller crashing after fencing but before killing the old sandbox.
+    ctl, zombie = proxied(session="zombie", epoch=1)
+    assert fetch(ctl, zombie, GITHUB).stdout.startswith("200 ")
+    proxied.registry.bump_epoch(zombie.caller.session, 2)
+    assert "403" in fetch(ctl, zombie, GITHUB).stdout
+    assert [l for l in lines(AUDIT_LOG) if l["session"] == zombie.caller.session][-1]["reason"] == "stale epoch"
+
+
+def test_unregistered_caller_is_denied(proxied):
+    ctl, sbx = proxied()
+    proxied.registry.unregister(sbx.name)
+    assert "403" in fetch(ctl, sbx, GITHUB).stdout
+    assert lines(AUDIT_LOG)[-1]["reason"] == "unknown caller"
