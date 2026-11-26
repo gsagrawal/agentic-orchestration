@@ -89,7 +89,8 @@ def is_over_budget(conn: sqlite3.Connection, tenant: str) -> bool:
     return bool(row and row["over_budget"])
 
 
-def register_executor(conn: sqlite3.Connection, executor_id: str, now: float) -> None:
+def heartbeat(conn: sqlite3.Connection, executor_id: str, now: float) -> None:
+    """Record that the executor is alive. The first call registers it."""
     conn.execute(
         "INSERT INTO executors (id, last_heartbeat) VALUES (?, ?) "
         "ON CONFLICT(id) DO UPDATE SET last_heartbeat = excluded.last_heartbeat",
@@ -97,16 +98,43 @@ def register_executor(conn: sqlite3.Connection, executor_id: str, now: float) ->
     )
 
 
-def least_loaded_executor(conn: sqlite3.Connection) -> str | None:
-    """The registered executor with the fewest running sessions (ties: lowest id), or None."""
+def least_loaded_executor(conn: sqlite3.Connection, alive_since: float) -> str | None:
+    """The live executor (heartbeat at or after `alive_since`) with the fewest running
+    sessions, ties broken by id. None if no executor is alive."""
     row = conn.execute(
         "SELECT e.id FROM executors e "
         "LEFT JOIN sessions s ON s.executor_id = e.id AND s.state = 'running' "
-        "GROUP BY e.id ORDER BY COUNT(s.id), e.id LIMIT 1"
+        "WHERE e.last_heartbeat >= ? "
+        "GROUP BY e.id ORDER BY COUNT(s.id), e.id LIMIT 1",
+        (alive_since,),
     ).fetchone()
     return row["id"] if row else None
 
 
-def unassigned_sessions(conn: sqlite3.Connection) -> list[str]:
-    rows = conn.execute("SELECT id FROM sessions WHERE state = 'created' ORDER BY rowid").fetchall()
+# A session needs an executor if it was never assigned, or if the executor it runs on
+# has not been heard from since `alive_since` (or is unknown). One definition, used to
+# list candidates and again to guard the update, so the two cannot drift apart.
+_NEEDS_EXECUTOR = """(state = 'created' OR (state = 'running' AND executor_id NOT IN
+    (SELECT id FROM executors WHERE last_heartbeat >= :alive_since)))"""
+
+
+def sessions_needing_executor(conn: sqlite3.Connection, alive_since: float) -> list[str]:
+    rows = conn.execute(
+        f"SELECT id FROM sessions WHERE {_NEEDS_EXECUTOR} ORDER BY rowid", {"alive_since": alive_since}
+    ).fetchall()
     return [r["id"] for r in rows]
+
+
+def assign_if_needed(conn: sqlite3.Connection, session_id: str, executor_id: str, alive_since: float) -> int | None:
+    """Like assign(), but only if the session still needs an executor. Returns the new
+    epoch, or None if it no longer does.
+
+    The guard matters: between listing candidates and assigning, a live executor may
+    have finished the session or put it to wait, and moving it then would be wrong.
+    """
+    row = conn.execute(
+        f"UPDATE sessions SET epoch = epoch + 1, executor_id = :executor_id, state = 'running' "
+        f"WHERE id = :id AND {_NEEDS_EXECUTOR} RETURNING epoch",
+        {"executor_id": executor_id, "id": session_id, "alive_since": alive_since},
+    ).fetchone()
+    return row["epoch"] if row else None
