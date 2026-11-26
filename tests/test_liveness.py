@@ -9,19 +9,9 @@ from orchestrator.agent_store import AgentStore
 from orchestrator.executor import Executor, start_worker
 from orchestrator.session_manager import ManagerConfig, SessionManager
 from orchestrator.tool_service import effect_counts
-from tests.helpers import wait_until
+from tests.helpers import Clock, wait_until
 
 LEASE = 3.0
-
-
-class Clock:
-    """A clock the test moves by hand, shared by the manager and the executors."""
-
-    def __init__(self, now=1000.0):
-        self.now = now
-
-    def __call__(self):
-        return self.now
 
 
 @pytest.fixture

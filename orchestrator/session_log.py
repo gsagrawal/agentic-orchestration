@@ -13,17 +13,20 @@ from .db import write_txn
 from .errors import StaleEpoch, UnknownSession
 
 
-def append(conn: sqlite3.Connection, session_id: str, epoch: int, kind: str, payload: dict) -> int:
+def append(conn: sqlite3.Connection, session_id: str, epoch: int, kind: str, payload: dict,
+           counts_as_step: bool = False) -> int:
     """Append one entry and return its sequence number (starting at 1).
 
+    `counts_as_step` also adds one to the session's step_count, in the same statement, so
+    the count the manager reads can never disagree with the log.
     Raises StaleEpoch if `epoch` is not the session's current epoch.
     """
     body = json.dumps(payload)  # serialize first, so a bad payload fails before any write
     with write_txn(conn):
         row = conn.execute(
-            "UPDATE sessions SET log_seq = log_seq + 1 "
+            "UPDATE sessions SET log_seq = log_seq + 1, step_count = step_count + ? "
             "WHERE id = ? AND epoch = ? RETURNING log_seq",
-            (session_id, epoch),
+            (int(counts_as_step), session_id, epoch),
         ).fetchone()
         if row is None:
             exists = conn.execute("SELECT 1 FROM sessions WHERE id = ?", (session_id,)).fetchone()

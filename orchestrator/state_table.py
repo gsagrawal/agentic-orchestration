@@ -14,11 +14,12 @@ from .errors import SessionClosed, StaleEpoch, UnknownSession
 def create_session(
     conn: sqlite3.Connection, session_id: str, tenant: str, step_cap: int,
     agent_id: str | None = None, agent_version: int | None = None, run_deadline: float | None = None,
+    wait_timeout: float = 3600.0,  # the manager always passes its own; this is for callers that do not care
 ) -> None:
     conn.execute(
-        "INSERT INTO sessions (id, tenant, step_cap, agent_id, agent_version, run_deadline) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (session_id, tenant, step_cap, agent_id, agent_version, run_deadline),
+        "INSERT INTO sessions (id, tenant, step_cap, agent_id, agent_version, run_deadline, wait_timeout) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (session_id, tenant, step_cap, agent_id, agent_version, run_deadline, wait_timeout),
     )
 
 
@@ -59,19 +60,41 @@ def assigned_to(conn: sqlite3.Connection, executor_id: str) -> list[tuple[str, i
     return [(r["id"], r["epoch"]) for r in rows]
 
 
-def release(conn: sqlite3.Connection, session_id: str, epoch: int, new_state: str) -> None:
-    """The executor gives the session back: 'done' or 'waiting'. Fenced by the epoch."""
-    if new_state not in ("done", "waiting"):
+def release(conn: sqlite3.Connection, session_id: str, epoch: int, new_state: str,
+            wait_deadline: float | None = None, stop_reason: str | None = None) -> None:
+    """The executor gives the session back: 'done', 'stopped' or 'waiting'.
+    A waiting session also gets its expiry time, a stopped one its reason. Fenced by the epoch."""
+    if new_state not in ("done", "stopped", "waiting"):
         raise ValueError(new_state)
     with write_txn(conn):
         row = conn.execute(
-            "UPDATE sessions SET state = ?, executor_id = NULL "
+            "UPDATE sessions SET state = ?, executor_id = NULL, wait_deadline = ?, stop_reason = ? "
             "WHERE id = ? AND epoch = ? AND state = 'running' RETURNING id",
-            (new_state, session_id, epoch),
+            (new_state, wait_deadline, stop_reason, session_id, epoch),
         ).fetchone()
         if row is None:
             get_session(conn, session_id)  # raises UnknownSession if it does not exist
             raise StaleEpoch(f"{session_id}: epoch {epoch} is not current")
+
+
+def expire_waiting(conn: sqlite3.Connection, now: float) -> list[str]:
+    """Waiting sessions past their wait deadline become 'expired'. They hold no executor,
+    so there is nothing to fence. Returns the ids."""
+    rows = conn.execute(
+        "UPDATE sessions SET state = 'expired', wait_deadline = NULL "
+        "WHERE state = 'waiting' AND wait_deadline < ? RETURNING id", (now,),
+    ).fetchall()
+    return [r["id"] for r in rows]
+
+
+def stop_overdue_runs(conn: sqlite3.Connection, now: float) -> list[str]:
+    """Running sessions past their run deadline become 'stopped'. The epoch is bumped so the
+    executor still working on one is fenced: its next write or tool call is rejected."""
+    rows = conn.execute(
+        "UPDATE sessions SET state = 'stopped', stop_reason = 'run_limit', executor_id = NULL, epoch = epoch + 1 "
+        "WHERE state = 'running' AND run_deadline < ? RETURNING id", (now,),
+    ).fetchall()
+    return [r["id"] for r in rows]
 
 
 LIVE_STATES = ("created", "running", "waiting")  # everything that is not terminal

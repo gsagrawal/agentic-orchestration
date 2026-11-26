@@ -9,6 +9,7 @@ One loop iteration for a session:
     3. if it is a tool call: call the tool service with (session, step, epoch),
        then append the result to the log
     4. if it is finish / wait: hand the session back to the session manager
+A tool call beyond the session's step cap is not made: the session is stopped instead.
 On pickup, a tool call that is logged but has no result was in flight when the previous
 executor died; SessionRun._recover_call_in_flight decides what to do about it.
 Every append and tool call carries the epoch, so a zombie is rejected at its next write.
@@ -45,6 +46,7 @@ class Replay:
         self.tool_steps = 0                   # tool calls started so far; the latest call's step number
         self.call_in_flight = False           # the latest tool call is logged but has no result yet
         self.last_action: dict | None = None  # the model's latest decision
+        self.stopped = False                  # a "stopped" entry (step cap) is in the log
 
     def apply(self, kind: str, payload: dict) -> None:
         if kind == "model":
@@ -57,6 +59,8 @@ class Replay:
         elif kind == "tool_result":
             self.messages.append({"role": "tool", "step": payload["step"], "content": payload["result"]})
             self.call_in_flight = False
+        elif kind == "stopped":
+            self.stopped = True
         elif kind == "tool_unknown":
             self.messages.append({"role": "tool", "step": payload["step"], "content": OUTCOME_UNKNOWN})
             self.call_in_flight = False
@@ -66,10 +70,11 @@ class SessionRun:
     """One session on one executor, at one epoch."""
 
     def __init__(self, conn, tools: ToolService, model, agents: AgentStore, session_id: str, epoch: int,
-                 fault_hook: Callable[[str], None]):
+                 fault_hook: Callable[[str], None], clock: Callable[[], float] = time.time):
         self.conn, self.tools, self.model, self.fault_hook = conn, tools, model, fault_hook
-        self.session_id, self.epoch = session_id, epoch
+        self.session_id, self.epoch, self.clock = session_id, epoch, clock
         row = state_table.get_session(conn, session_id)
+        self.step_cap, self.wait_timeout = row["step_cap"], row["wait_timeout"]
         self.agent = agents.get(row["agent_id"], row["agent_version"])  # the pinned version
         self.replay = Replay()
         for entry in session_log.read(conn, session_id):
@@ -80,18 +85,32 @@ class SessionRun:
         r = self.replay
         if r.call_in_flight:
             self._recover_call_in_flight()
-        elif r.last_action is None or r.last_action["do"] == "tool":
+        elif not r.stopped and (r.last_action is None or r.last_action["do"] == "tool"):
             self._decide_and_act()
-        last = r.last_action["do"]
-        if last in ("finish", "wait"):
-            state_table.release(self.conn, self.session_id, self.epoch, "done" if last == "finish" else "waiting")
-            return True
-        return False
+        return self._release_if_finished()
+
+    def _release_if_finished(self) -> bool:
+        """Hand the session back if the loop has ended. Returns True if it did."""
+        last = self.replay.last_action and self.replay.last_action["do"]
+        if self.replay.stopped:
+            state_table.release(self.conn, self.session_id, self.epoch, "stopped", stop_reason="step_cap")
+        elif last == "finish":
+            state_table.release(self.conn, self.session_id, self.epoch, "done")
+        elif last == "wait":
+            deadline = self.clock() + self.wait_timeout
+            state_table.release(self.conn, self.session_id, self.epoch, "waiting", wait_deadline=deadline)
+        else:
+            return False
+        return True
 
     def _decide_and_act(self) -> None:
         action = self.model.decide(self.agent, self.replay.messages)
-        self._append("model", {"action": action})
-        if action["do"] == "tool":
+        is_tool = action["do"] == "tool"
+        if is_tool and self.replay.tool_steps >= self.step_cap:
+            self._append("stopped", {"reason": "step_cap"})  # the call is refused, not logged as made
+            return
+        self._append("model", {"action": action}, counts_as_step=is_tool)
+        if is_tool:
             self._call_tool(action)
 
     def _call_tool(self, action: dict) -> None:
@@ -121,8 +140,8 @@ class SessionRun:
         else:
             self._append("tool_unknown", {"step": step})
 
-    def _append(self, kind: str, payload: dict) -> None:
-        session_log.append(self.conn, self.session_id, self.epoch, kind, payload)
+    def _append(self, kind: str, payload: dict, counts_as_step: bool = False) -> None:
+        session_log.append(self.conn, self.session_id, self.epoch, kind, payload, counts_as_step)
         self.replay.apply(kind, payload)  # only after the append succeeded
 
 
@@ -155,7 +174,7 @@ class Executor:
         for sid, epoch in assigned.items():
             try:
                 if sid not in self.runs:
-                    self.runs[sid] = SessionRun(self.conn, self.tools, self.model, self.agents, sid, epoch, self.fault_hook)
+                    self.runs[sid] = SessionRun(self.conn, self.tools, self.model, self.agents, sid, epoch, self.fault_hook, self.clock)
                 if self.runs[sid].advance():
                     del self.runs[sid]
             except StaleEpoch:
