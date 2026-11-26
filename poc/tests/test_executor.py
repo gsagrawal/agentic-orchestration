@@ -50,3 +50,28 @@ def test_timeout_in_a_step_is_reported_and_the_next_step_gets_a_fresh_sandbox(pr
     results = ex.run(Caller(f"s-to-{uuid.uuid4().hex[:8]}", "agent-a", "tenant-a", 1),
                      [ToolCall("bash", "sleep 30"), ToolCall("bash", "echo ok")], tmp_path / "wd")
     assert results[0]["result"]["timed_out"] and results[1]["result"]["stdout"] == "ok\n"
+
+
+def test_works_with_a_controller_that_has_no_proxy(tmp_path):
+    from sandbox_controller import SandboxController
+    ex = AgentExecutor(SandboxController(), GRANTS, tmp_path / "log.jsonl")
+    results = ex.run(Caller(f"s-np-{uuid.uuid4().hex[:8]}", "agent-no-net", "tenant-a", 1), [ToolCall("bash", "echo ok")], tmp_path / "wd")
+    assert results[0]["result"]["stdout"] == "ok\n"
+
+
+def test_session_deadline_ends_the_session(proxied, tmp_path):
+    _, ex = _executor(proxied, tmp_path, deadline_s=4)
+    results = ex.run(Caller(f"s-dl-{uuid.uuid4().hex[:8]}", "agent-a", "tenant-a", 1),
+                     [ToolCall("bash", "echo one"), ToolCall("bash", "sleep 30"), ToolCall("bash", "echo three")], tmp_path / "wd")
+    assert results[0]["result"]["stdout"] == "one\n"
+    assert results[1]["result"]["timed_out"]                       # cut off by the session deadline, not by the 30 s step timeout
+    assert results[2]["result"] == {"error": "session deadline reached"}
+
+
+def test_a_lost_sandbox_is_replaced_and_the_unstarted_command_runs_once(proxied, tmp_path):
+    from sandbox_controller import Limits
+    _, ex = _executor(proxied, tmp_path, limits=Limits(deadline_s=3))     # the sandbox itself expires after 3 s
+    results = ex.run(Caller(f"s-lost-{uuid.uuid4().hex[:8]}", "agent-a", "tenant-a", 1),
+                     [ToolCall("bash", "sleep 5"), ToolCall("bash", "echo recovered")], tmp_path / "wd")
+    assert results[0]["result"]["exit_code"] != 0 and not results[0]["result"]["timed_out"]   # died mid-run: reported, not retried
+    assert results[1]["result"]["stdout"] == "recovered\n"                                   # next step got a fresh sandbox

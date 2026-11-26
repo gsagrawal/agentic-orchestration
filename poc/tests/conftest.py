@@ -29,6 +29,18 @@ def stack():
     return stack_mod
 
 
+@pytest.fixture(scope="session", autouse=True)
+def no_leaked_sandboxes():
+    """After the whole run, no sandbox container or sandbox network may be left behind."""
+    yield
+    docker = lambda *a: subprocess.run(["docker", *a], capture_output=True, text=True).stdout.split()
+    leaked = docker("ps", "-aq", "--filter", "label=agent-sandbox=1") + \
+        docker("network", "ls", "-q", "--filter", "label=agent-sandbox=1")
+    if leaked:
+        SandboxController(proxy=None).reap()
+        pytest.fail(f"leaked sandbox resources: {leaked}", pytrace=False)
+
+
 @pytest.fixture
 def make_sandbox(tmp_path):
     """Factory for plain (no network) sandboxes; everything created is killed afterwards."""

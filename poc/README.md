@@ -9,7 +9,7 @@ containers. Design context: [../docs/service-architecture.md](../docs/service-ar
 ```bash
 pip install pytest      # the only host dependency besides Docker and Python 3.10+
 make demo               # scripted agent: pandoc, a credentialed call, a denied call, an escape attempt
-make test               # 36 tests, ~45 s
+make test               # 50 tests, ~80 s
 make bench              # cold start, 50 runs per configuration
 make down               # stop the proxy and stub
 ```
@@ -38,12 +38,12 @@ Not present at all: session-manager, ingress, auth, llm-gateway, object store, r
 
 - **Sandbox:** read-only root filesystem, size-capped tmpfs scratch, non-root user, all capabilities dropped, no-new-privileges, CPU / memory (no swap) / process-count limits, a hard deadline that is the container's own lifetime, a mounted work dir, output capped. Every flag is explained in [docs/docker-flags.md](docs/docker-flags.md).
 - **Timeout kill:** a command past its timeout takes the whole sandbox down (verified gone, not just the client).
-- **Network:** the sandbox is on a Docker `internal: true` network. It has no route to the internet or to the stub, and cannot resolve outside names. The proxy is the only thing it can reach.
-- **Proxy (real mitmproxy):** identifies the caller by source address from a registry file (never from request contents); rejects a stale epoch; checks the destination against the agent's grants; applies a per-tenant sliding-window rate limit; swaps the placeholder token for the real one; scrubs the real value from the response; writes an audit line holding the credential's *name*. Anything doubtful is denied.
+- **Network:** every sandbox gets its own Docker `--internal` network, shared with nothing but the proxy. It has no route to the internet, the stub or any other sandbox, and cannot resolve outside names or other sandboxes' names. The network is removed when the sandbox stops.
+- **Proxy (real mitmproxy):** identifies the caller by source address from a registry file (never from request contents); rejects a stale epoch or an agent/tenant mismatch; checks host, port and HTTPS against the agent's grants; applies a per-tenant sliding-window rate limit; writes the audit line *before* using the credential, then swaps the placeholder for the real token; scrubs the real value from the response; audits the outcome, including failures. Names the credential, never its value. Anything doubtful, including an exception inside the proxy, is denied.
 - **Credential handling:** the sandbox gets a placeholder token and the proxy's *public* certificate only. The real token reaches the stub; it is not in the sandbox's environment, filesystem or output.
 - **Fencing:** starting a sandbox with a newer epoch stops the old one; an older epoch is refused; a zombie with a stale epoch is rejected by the proxy.
-- **Executor:** checks each tool call against the agent's grants and a step cap, creates the sandbox lazily, appends every step to a session log.
-- **Tests were broken on purpose.** For each protection I removed it and confirmed its test fails ([docker-flags.md](docs/docker-flags.md#how-this-was-checked)). That caught two tests that passed vacuously.
+- **Executor:** checks each tool call against the agent's grants, a step cap and a session deadline, creates the sandbox lazily, replaces a sandbox that vanished (only when the command never started), appends every step to a session log.
+- **Tests were broken on purpose.** For each protection I removed it and confirmed its test fails ([docker-flags.md](docs/docker-flags.md#how-this-was-checked)). That caught tests that passed vacuously, and later a code review found real bugs, including a cross-tenant network path and a fail-open proxy; each now has a test that was seen failing before the fix.
 
 ## What is faked
 
@@ -66,6 +66,14 @@ Not present at all: session-manager, ingress, auth, llm-gateway, object store, r
 | Cannot read host files / another sandbox's work dir (incl. via symlink) | `test_sandbox_cannot_read_host_files`, `test_sandbox_cannot_read_another_sandboxs_workdir` |
 | pandoc converts md → docx/html inside the sandbox | `test_pandoc_converts_markdown_inside_the_sandbox` |
 | Direct request to the stub fails; no internet, no DNS | `test_direct_request_to_the_stub_fails`, `test_no_route_to_the_internet_and_no_dns` |
+| One sandbox cannot reach another; networks are cleaned up | `test_sandboxes_cannot_reach_each_other`, `test_stopping_a_sandbox_removes_its_network` |
+| Plaintext HTTP and ungranted ports are not forwarded | `test_plaintext_http_and_other_ports_are_not_forwarded` |
+| A proxy error denies rather than forwards | `test_a_policy_error_denies_instead_of_forwarding` |
+| Failed upstream calls are still audited | `test_a_failed_upstream_call_is_still_audited` |
+| Agent/tenant mismatch refused (controller and proxy) | `test_controller_refuses_an_agent_tenant_mismatch`, `test_proxy_rejects_an_agent_tenant_mismatch` |
+| Scrubbing leaves repeated headers and HEAD responses intact | `test_response_scrubbing_keeps_headers_intact` |
+| The leak detector itself works (no vacuous "not found") | `test_the_leak_detector_detects_a_planted_leak` |
+| Registry: no lost updates, no stale reads | `tests/test_registry.py` |
 | Ungranted destination denied (and audited) | `test_destination_not_in_grants_is_denied` |
 | Identity from address, not claims | `test_caller_is_identified_by_address_not_by_claims` |
 | Real token in the stub, nowhere in the sandbox | `test_stub_receives_the_real_token_but_the_sandbox_never_sees_it`, `test_real_token_is_nowhere_in_the_sandbox`, `test_proxy_private_key_is_not_in_the_sandbox` |
@@ -73,7 +81,7 @@ Not present at all: session-manager, ingress, auth, llm-gateway, object store, r
 | Rate limit | `test_rate_limit_is_per_tenant_and_a_window` |
 | Stale epoch rejected; new epoch stops the old sandbox | `test_zombie_with_a_stale_epoch_is_rejected_by_the_proxy`, `test_new_epoch_stops_the_old_sandbox`, `test_stale_epoch_cannot_start_a_sandbox` |
 | Pinned-certificate tool fails closed, no credential | `test_a_tool_that_pins_the_certificate_fails_closed_with_no_credential` |
-| Executor: grants, step cap, lazy sandbox, log | `tests/test_executor.py` |
+| Executor: grants, step cap, lazy sandbox, log, session deadline, lost-sandbox replacement, no-proxy controller | `tests/test_executor.py` |
 
 Cold start (measured; see [docs/cold-start.md](docs/cold-start.md) for the table and caveats): a fresh
 sandbox is ready in about 0.25 s (no proxy) to 0.31 s (proxied) at p50, p95 0.27–0.33 s, on a

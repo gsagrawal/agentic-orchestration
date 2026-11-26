@@ -1,5 +1,5 @@
-from .controller import (INTERNAL_NET, ExecResult, Limits, ProxyConfig, Sandbox,
-                         SandboxController, SandboxError)
+from .controller import (ExecResult, Limits, ProxyConfig, Sandbox, SandboxController,
+                         SandboxError, SandboxGone)
 
-__all__ = ["INTERNAL_NET", "ExecResult", "Limits", "ProxyConfig", "Sandbox",
-           "SandboxController", "SandboxError"]
+__all__ = ["ExecResult", "Limits", "ProxyConfig", "Sandbox", "SandboxController",
+           "SandboxError", "SandboxGone"]

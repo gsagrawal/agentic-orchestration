@@ -2,13 +2,20 @@
 
 Written by sandbox-controller when it creates or stops a sandbox, read by
 agent-network-proxy to identify a caller from its source address. Stdlib
-only, because it runs in both places. The file is replaced atomically, so a
-reader never sees a half-written registry.
+only, because it runs in both places.
+
+Writers take an exclusive file lock around read-modify-write, so concurrent
+writers cannot drop each other's updates, and replace the file atomically,
+so a reader never sees a half-written registry. Readers re-read the file on
+every lookup: it is small, and any cache keyed on a file timestamp can serve
+stale data (coarse timestamps, e.g. on bind mounts), which here would mean
+trusting a caller that was already unregistered.
 
 Layout: {"callers": {ip: {...Caller, "sandbox": name}}, "epochs": {session: newest_epoch}}
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import tempfile
@@ -27,42 +34,42 @@ class Caller:
 class Registry:
     def __init__(self, path: Path):
         self.path = Path(path)
-        self._cache: tuple[float, dict] | None = None
 
     def _read(self) -> dict:
         try:
-            mtime = self.path.stat().st_mtime_ns
+            return json.loads(self.path.read_text())
         except FileNotFoundError:
             return {"callers": {}, "epochs": {}}
-        if self._cache is None or self._cache[0] != mtime:
-            self._cache = (mtime, json.loads(self.path.read_text()))
-        return self._cache[1]
 
-    def _write(self, data: dict) -> None:
-        fd, tmp = tempfile.mkstemp(dir=self.path.parent)
-        with os.fdopen(fd, "w") as f:
-            json.dump(data, f)
-        os.chmod(tmp, 0o644)
-        os.replace(tmp, self.path)
+    def _update(self, change) -> None:
+        with open(self.path.with_name(self.path.name + ".lock"), "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            data = self._read()
+            change(data)
+            fd, tmp = tempfile.mkstemp(dir=self.path.parent)
+            with os.fdopen(fd, "w") as f:
+                json.dump(data, f)
+            os.chmod(tmp, 0o644)
+            os.replace(tmp, self.path)
 
     # -- controller side ---------------------------------------------------
 
     def register(self, ip: str, caller: Caller, sandbox: str) -> None:
-        data = json.loads(json.dumps(self._read()))
-        data["callers"][ip] = {**asdict(caller), "sandbox": sandbox}
-        data["epochs"][caller.session] = max(data["epochs"].get(caller.session, 0), caller.epoch)
-        self._write(data)
+        def change(data):
+            data["callers"][ip] = {**asdict(caller), "sandbox": sandbox}
+            data["epochs"][caller.session] = max(data["epochs"].get(caller.session, 0), caller.epoch)
+        self._update(change)
 
     def unregister(self, sandbox: str) -> None:
-        data = json.loads(json.dumps(self._read()))
-        data["callers"] = {ip: c for ip, c in data["callers"].items() if c["sandbox"] != sandbox}
-        self._write(data)
+        def change(data):
+            data["callers"] = {ip: c for ip, c in data["callers"].items() if c["sandbox"] != sandbox}
+        self._update(change)
 
     def bump_epoch(self, session: str, epoch: int) -> None:
         """Fence: from now on the proxy rejects any caller of `session` older than `epoch`."""
-        data = json.loads(json.dumps(self._read()))
-        data["epochs"][session] = max(data["epochs"].get(session, 0), epoch)
-        self._write(data)
+        def change(data):
+            data["epochs"][session] = max(data["epochs"].get(session, 0), epoch)
+        self._update(change)
 
     # -- proxy side --------------------------------------------------------
 

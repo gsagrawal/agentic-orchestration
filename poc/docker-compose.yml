@@ -1,5 +1,6 @@
 # The always-on parts: agent-network-proxy, the GitHub stub, and the two networks.
-# Sandboxes are NOT here: sandbox-controller creates them on demand.
+# Sandboxes and their networks are NOT here: sandbox-controller creates, for every sandbox, its own
+# `--internal` network (no route off it, and no other sandbox on it) and attaches the proxy to it.
 name: agentpoc
 
 x-hardened: &hardened
@@ -27,7 +28,7 @@ services:
       - ./.state/audit:/audit
       - ./.state/stub:/stub:ro             # the stub's public cert, so the proxy verifies its upstream
       - ./.state/proxy-conf:/conf          # the proxy's CA; the private key never leaves this container
-    networks: [internal, upstream]
+    networks: [upstream]   # sandbox networks are attached to it on demand by sandbox-controller
     depends_on:
       stub: {condition: service_healthy}
     healthcheck:
@@ -47,7 +48,6 @@ services:
       retries: 30
 
 networks:
-  internal: {internal: true}   # no route off this network: this is what boxes a sandbox in
   upstream: {}
 
 secrets:

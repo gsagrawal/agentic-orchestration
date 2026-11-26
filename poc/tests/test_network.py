@@ -1,5 +1,6 @@
 """Network: the sandbox reaches only the proxy, and the proxy enforces who, where, and how often."""
 import subprocess
+import threading
 import time
 
 from conftest import AUDIT_LOG, STATE, STUB_LOG, fetch, lines, py
@@ -99,3 +100,68 @@ def test_unregistered_caller_is_denied(proxied):
     proxied.registry.unregister(sbx.name)
     assert "403" in fetch(ctl, sbx, GITHUB).stdout
     assert lines(AUDIT_LOG)[-1]["reason"] == "unknown caller"
+
+
+def test_sandboxes_cannot_reach_each_other(proxied):
+    ctl, a = proxied(tenant="tenant-a")
+    _, b = proxied(agent="agent-b", tenant="tenant-b")
+    listener = threading.Thread(target=lambda: py(ctl, a, (
+        "import socket\ns=socket.socket(); s.setsockopt(1,2,1); s.bind(('0.0.0.0',9000)); s.listen(); s.settimeout(8)\n"
+        "c,_=s.accept(); c.send(b'A-SECRET')"), timeout_s=10))
+    listener.start(); time.sleep(1.5)
+    ip = subprocess.run(["docker", "inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}", a.name],
+                        capture_output=True, text=True).stdout.split()[0]
+    r = py(ctl, b, f"import socket; print(socket.create_connection(('{ip}', 9000), 4).recv(20))")
+    assert "A-SECRET" not in r.stdout and r.exit_code != 0
+    assert py(ctl, b, f"import socket; socket.getaddrinfo('{a.name}', 9000)").exit_code != 0   # not even by name
+    listener.join()
+
+
+def test_plaintext_http_and_other_ports_are_not_forwarded(proxied):
+    ctl, sbx = proxied()
+    before = len(lines(STUB_LOG))
+    assert "403" in fetch(ctl, sbx, "http://api.github.test/user").stdout            # plaintext, port 80
+    assert "403" in fetch(ctl, sbx, "http://api.github.test:443/user").stdout       # plaintext on a granted port: only the scheme check stops this
+    assert "403" in fetch(ctl, sbx, "https://api.github.test:8443/user").stdout     # TLS on a port that is not granted
+    assert len(lines(STUB_LOG)) == before
+
+
+def test_a_policy_error_denies_instead_of_forwarding(proxied):
+    ctl, sbx = proxied(agent="agent-broken")      # its grant names a credential that does not exist
+    before = len(lines(STUB_LOG))
+    assert "HTTPError" in fetch(ctl, sbx, GITHUB).stdout
+    assert len(lines(STUB_LOG)) == before         # failed closed: nothing reached the destination
+    assert lines(AUDIT_LOG)[-1]["decision"] == "deny"
+
+
+def test_a_failed_upstream_call_is_still_audited(proxied):
+    ctl, sbx = proxied()
+    fetch(ctl, sbx, "https://down.test/x")        # granted, but does not resolve
+    entry = [l for l in lines(AUDIT_LOG) if l["host"] == "down.test"][-1]
+    assert entry["decision"] == "error" and entry["session"] == sbx.caller.session
+
+
+def test_proxy_rejects_an_agent_tenant_mismatch(proxied):
+    ctl, sbx = proxied()
+    proxied.registry.register(sbx.ip, Caller(sbx.caller.session, "agent-a", "tenant-b", 1), sbx.name)  # bypasses the controller
+    before = len(lines(STUB_LOG))
+    assert "403" in fetch(ctl, sbx, GITHUB).stdout
+    assert len(lines(STUB_LOG)) == before
+    assert lines(AUDIT_LOG)[-1]["reason"] == "agent/tenant mismatch"
+
+
+def test_controller_refuses_an_agent_tenant_mismatch(proxied, tmp_path):
+    import pytest
+    from sandbox_controller import SandboxError
+    ctl, _ = proxied()
+    with pytest.raises(SandboxError, match="mismatch"):
+        ctl.create(tmp_path / "m", Caller("s-mm", "agent-a", "tenant-b", 1))
+
+
+def test_stopping_a_sandbox_removes_its_network(proxied):
+    ctl, sbx = proxied()
+    nets = lambda: subprocess.run(["docker", "network", "ls", "-q", "--filter", f"name={sbx.network}"],
+                                  capture_output=True, text=True).stdout.split()
+    assert nets()
+    ctl.stop(sbx)
+    assert not nets()

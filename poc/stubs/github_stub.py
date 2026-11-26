@@ -34,6 +34,20 @@ def make_cert() -> None:
 
 
 class Handler(BaseHTTPRequestHandler):
+    def do_HEAD(self):
+        self._send(b"", content_length=5)
+
+    def _send(self, body: bytes, content_length: int | None = None) -> None:
+        """Two Set-Cookie headers and an echo of the credential in a header: awkward cases for a response scrubber."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Set-Cookie", "a=1")
+        self.send_header("Set-Cookie", "b=2")
+        self.send_header("X-Echo", self.headers.get("Authorization", ""))
+        self.send_header("Content-Length", str(len(body) if content_length is None else content_length))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         headers = dict(self.headers.items())
         record = {"ts": datetime.datetime.now().isoformat(), "method": self.command, "path": self.path,
@@ -41,6 +55,8 @@ class Handler(BaseHTTPRequestHandler):
         print(json.dumps(record), flush=True)
         with (OUT / "received.jsonl").open("a") as f:
             f.write(json.dumps(record) + "\n")
+        if self.path == "/headers":
+            return self._send(b"hello")
         body = json.dumps({"login": "octocat", "received_authorization": headers.get("Authorization")}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")

@@ -18,7 +18,7 @@ from pathlib import Path
 
 from agent_network_proxy.registry import Caller, Registry
 
-INTERNAL_NET = "agentpoc_internal"   # `internal: true` in docker-compose.yml: no route out
+LABEL = "agent-sandbox=1"
 
 
 # All defaults are ASSUMPTIONS, not measurements. See docs/design-choices.md.
@@ -38,6 +38,7 @@ class ProxyConfig:
     ca_cert: Path                   # the proxy's PUBLIC certificate (never its key)
     registry: Registry
     grants_path: Path               # to learn which placeholder tokens an agent gets
+    proxy_container: str = "agentpoc-proxy-1"
 
 
 @dataclass
@@ -54,12 +55,18 @@ class SandboxError(RuntimeError):
     pass
 
 
+class SandboxGone(SandboxError):
+    """The sandbox no longer exists (deadline hit, or killed), so the command was never started."""
+
+
 @dataclass
 class Sandbox:
     name: str
     workdir: Path
     limits: Limits
     caller: Caller | None = None
+    ip: str | None = None           # its address on its own private network (proxied sandboxes only)
+    network: str | None = None
     alive: bool = True
 
 
@@ -75,17 +82,41 @@ class SandboxController:
                user: str = "65534:65534") -> Sandbox:
         if self.proxy and caller is None:
             raise SandboxError("a proxied sandbox needs a caller identity to register")
+        if self.proxy:
+            self._check_tenant(caller)
         if caller:
             self._fence(caller)
         workdir = Path(workdir).resolve()
         workdir.mkdir(parents=True, exist_ok=True)
         workdir.chmod(0o777)  # the unprivileged sandbox user must be able to write here
         name = f"sbx-{uuid.uuid4().hex[:12]}"
-        args = [
-            "run", "-d", "--rm", "--name", name, "--label", "agent-sandbox=1",
+        sandbox = Sandbox(name=name, workdir=workdir, limits=limits, caller=caller)
+        try:
+            if self.proxy:
+                sandbox.network = f"agentpoc_{name}"
+                self._docker(["network", "create", "--internal", "--label", LABEL, sandbox.network], "create network")
+                self._docker(["network", "connect", "--alias", "proxy", sandbox.network, self.proxy.proxy_container],
+                             "attach proxy to sandbox network")
+            self._docker(self._run_args(sandbox, user), "create sandbox")
+            if self.proxy:
+                sandbox.ip = self._docker(
+                    ["inspect", "-f", f'{{{{(index .NetworkSettings.Networks "{sandbox.network}").IPAddress}}}}', name],
+                    "inspect sandbox")
+                self.proxy.registry.register(sandbox.ip, caller, name)
+        except Exception:
+            self.stop(sandbox)
+            raise
+        if caller:
+            self._by_session[caller.session] = sandbox
+        return sandbox
+
+    def _run_args(self, sandbox: Sandbox, user: str) -> list[str]:
+        limits = sandbox.limits
+        return [
+            "run", "-d", "--rm", "--name", sandbox.name, "--label", LABEL,
             "--read-only",
             "--tmpfs", f"/tmp:rw,noexec,nosuid,nodev,size={limits.tmpfs_mb}m",
-            "--mount", f"type=bind,src={workdir},dst=/work",
+            "--mount", f"type=bind,src={sandbox.workdir},dst=/work",
             "--workdir", "/work",
             "--user", user,
             "--cap-drop", "ALL",
@@ -95,30 +126,54 @@ class SandboxController:
             "--pids-limit", str(limits.pids),
             "--init",
             "--env", "HOME=/tmp", "--env", "PYTHONDONTWRITEBYTECODE=1",
-            *self._network_args(caller),
+            *self._network_args(sandbox),
             self.image, "sleep", str(limits.deadline_s),
         ]
-        self._docker(args, "create sandbox")
-        sandbox = Sandbox(name=name, workdir=workdir, limits=limits, caller=caller)
-        if caller:
-            try:
-                ip = self._docker(["inspect", "-f",
-                                   f'{{{{(index .NetworkSettings.Networks "{INTERNAL_NET}").IPAddress}}}}',
-                                   name], "inspect sandbox")
-                self.proxy.registry.register(ip, caller, name)
-            except Exception:
-                self.stop(sandbox)
-                raise
-            self._by_session[caller.session] = sandbox
-        return sandbox
 
     def stop(self, sandbox: Sandbox) -> None:
+        """Kill the sandbox, forget it, and remove its network. Safe to call twice."""
         sandbox.alive = False
         if self.proxy:
             self.proxy.registry.unregister(sandbox.name)  # unregister first: no window where a dying sandbox is still trusted
         subprocess.run([self.docker, "kill", sandbox.name], capture_output=True)
+        self._wait_until_gone(sandbox.name)
+        if sandbox.network:
+            self._remove_network(sandbox.network)
         if sandbox.caller and self._by_session.get(sandbox.caller.session) is sandbox:
             del self._by_session[sandbox.caller.session]
+
+    def reap(self) -> None:
+        """Remove every sandbox and sandbox network this controller's label owns, e.g. after a crash."""
+        ids = self._docker(["ps", "-aq", "--filter", f"label={LABEL}"], "list sandboxes").split()
+        if ids:
+            subprocess.run([self.docker, "kill", *ids], capture_output=True)
+            for container in ids:
+                self._wait_until_gone(container)
+        for net in self._docker(["network", "ls", "-q", "--filter", f"label={LABEL}", "--format", "{{.Name}}"],
+                                "list networks").split():
+            self._remove_network(net)
+        self._by_session.clear()
+
+    def _wait_until_gone(self, name: str, timeout_s: float = 10) -> None:
+        """`docker kill` returns once the signal is sent; `--rm` removes the container a moment later.
+        Return only when it is really gone, so "stopped" means stopped (and its network can be removed)."""
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if subprocess.run([self.docker, "inspect", name], capture_output=True).returncode != 0:
+                return
+            time.sleep(0.05)
+        raise SandboxError(f"{name} still exists {timeout_s}s after kill")
+
+    def _remove_network(self, network: str) -> None:
+        if self.proxy:
+            subprocess.run([self.docker, "network", "disconnect", "-f", network, self.proxy.proxy_container],
+                           capture_output=True)
+        subprocess.run([self.docker, "network", "rm", network], capture_output=True)
+
+    def _check_tenant(self, caller: Caller) -> None:
+        agent = json.loads(self.proxy.grants_path.read_text())["agents"].get(caller.agent)
+        if agent is None or agent["tenant"] != caller.tenant:
+            raise SandboxError(f"agent/tenant mismatch: {caller.agent} is not a member of tenant {caller.tenant}")
 
     def _fence(self, caller: Caller) -> None:
         """Starting a sandbox with a newer epoch stops the old one; an older or equal epoch is refused."""
@@ -131,16 +186,16 @@ class SandboxController:
         if old:
             self.stop(old)
 
-    def _network_args(self, caller: Caller | None) -> list[str]:
+    def _network_args(self, sandbox: Sandbox) -> list[str]:
         if self.proxy is None:
             return ["--network", "none"]
-        grants = json.loads(self.proxy.grants_path.read_text())["agents"][caller.agent]
+        grants = json.loads(self.proxy.grants_path.read_text())["agents"][sandbox.caller.agent]
         env = {d["env_var"]: d["placeholder"] for d in grants["destinations"].values()}
         ca = "/etc/ssl/proxy-ca.pem"
         env.update({k: ca for k in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
                                     "NODE_EXTRA_CA_CERTS", "GIT_SSL_CAINFO")})
         env.update({k: self.proxy.proxy_url for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")})
-        args = ["--network", INTERNAL_NET,
+        args = ["--network", sandbox.network,
                 "--mount", f"type=bind,src={self.proxy.ca_cert},dst={ca},readonly"]
         for k, v in env.items():
             args += ["--env", f"{k}={v}"]
@@ -173,9 +228,21 @@ class SandboxController:
             proc.kill()
             proc.wait()
         out.join(), err.join()
+        if not timed_out and proc.returncode != 0 and self._vanished(sandbox, err.text()):
+            self.stop(sandbox)
+            raise SandboxGone(f"{sandbox.name} is gone (deadline reached or killed); the command was not started")
         return ExecResult(exit_code=proc.returncode, stdout=out.text(), stderr=err.text(),
                           timed_out=timed_out, duration_s=time.monotonic() - start,
                           truncated=out.truncated or err.truncated)
+
+    def _vanished(self, sandbox: Sandbox, stderr: str) -> bool:
+        """`docker exec` could not start the command because the container is not running. The stderr text
+        is only a hint (a command can print anything), so confirm with the daemon."""
+        if "Error response from daemon" not in stderr:
+            return False
+        running = subprocess.run([self.docker, "inspect", "-f", "{{.State.Running}}", sandbox.name],
+                                 capture_output=True, text=True)
+        return running.returncode != 0 or running.stdout.strip() != "true"
 
     def _docker(self, args: list[str], what: str) -> str:
         done = subprocess.run([self.docker, *args], capture_output=True, text=True)

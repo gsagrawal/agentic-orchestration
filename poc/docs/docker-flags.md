@@ -55,7 +55,7 @@ not set by a flag and this PoC does not test it separately).
 | Setting | What it does | What it stops | Proved by |
 |---|---|---|---|
 | `--network none` (no-proxy mode) | No network interface except loopback. | All network access. Used by the isolation tests, which need none. | `test_isolation.py` |
-| `--network agentpoc_internal` | Attaches to a Docker network declared `internal: true` in `docker-compose.yml`: containers on it can talk to each other, but the network has no gateway, so there is no route off it. Only the proxy is also attached to a second, external network. | Direct connections to the internet or to anything not on this network (the stub lives only on the other network). DNS for outside names fails for the same reason. | `test_direct_request_to_the_stub_fails`, `test_no_route_to_the_internet_and_no_dns` |
+| `docker network create --internal <per-sandbox>` then `--network <per-sandbox>` | Every sandbox gets its **own** network, declared `--internal`: containers on it can talk to each other, but there is no gateway, so no route off it. Only the sandbox and the proxy are attached to it (`docker network connect --alias proxy`). The network is removed when the sandbox stops. | Direct connections to the internet or to the stub (which lives only on the proxy's other network); DNS for outside names; and, because no other sandbox is on the network, **sandbox-to-sandbox traffic**. A first version put all sandboxes on one shared internal network, which let a tenant-b sandbox read data from a tenant-a sandbox. Switching off container-to-container traffic on a shared network is not an option: it would also block the sandbox's route to the proxy. | `test_direct_request_to_the_stub_fails`, `test_no_route_to_the_internet_and_no_dns`, `test_sandboxes_cannot_reach_each_other`, `test_stopping_a_sandbox_removes_its_network` |
 | `--env HTTPS_PROXY=… SSL_CERT_FILE=… GH_TOKEN=<placeholder>` | Tells well-behaved tools to use the proxy, to trust its certificate, and gives them a placeholder token. | Nothing: these are conveniences, not a control. The control is the network above; a tool that ignores `HTTPS_PROXY` simply has no route. | `test_the_sandbox_holds_only_the_placeholder` |
 
 The proxy and stub containers (compose) carry the same hardening:
@@ -64,30 +64,24 @@ The proxy and stub containers (compose) carry the same hardening:
 ## How this was checked
 
 "Proved by" means the named test passes with the flag and fails without it.
-That was verified by deleting the flag from `create()` and re-running
-(`Checked by removal, test went red every time: `--read-only`, `--tmpfs` size
-cap, `--user`, `--cap-drop ALL`, `no-new-privileges`, `--cpus`, `--memory`,
-`--pids-limit`, kill-the-container-on-timeout, and the `internal: true`
-network (made routable: both network tests failed).
+That was verified by deleting the flag from the controller and re-running the
+test. It is what showed that the first draft of the capability test was
+vacuous (it passed with `--cap-drop` removed, because it asserted `CapEff`;
+it now asserts `CapBnd`). The proxy's checks were verified the same way, by
+breaking the addon and rebuilding the proxy image.
+
+Checked by removal, the test went red every time:
+
+- `--read-only`, the `--tmpfs` size cap, `--user`, `--cap-drop ALL`,
+  `no-new-privileges`, `--cpus`, `--memory`, `--pids-limit`
+- kill-the-container-on-timeout
+- the `--internal` network (made routable: both network tests failed) and the
+  one-network-per-sandbox rule (made shared: the sandbox-to-sandbox test failed)
 
 **Not** checked that way, so "proved by" is weaker for them: `--memory-swap`
-(the test host may have no swap at all), the `/work` and CA bind mounts
-(the tests show what is *not* visible, not that removing the flag changes
-it), `--init`, `--rm`, `--workdir`.` below). It is what showed the first draft of the
-capability test was vacuous: it passed with `--cap-drop` removed, because it
-asserted `CapEff`, so it now asserts `CapBnd`. The proxy's checks (stale
-epoch, destination grant, response scrubbing, rate limit, audit content)
-were checked the same way by breaking the addon and rebuilding the proxy.
-
-Checked by removal, test went red every time: `--read-only`, `--tmpfs` size
-cap, `--user`, `--cap-drop ALL`, `no-new-privileges`, `--cpus`, `--memory`,
-`--pids-limit`, kill-the-container-on-timeout, and the `internal: true`
-network (made routable: both network tests failed).
-
-**Not** checked that way, so "proved by" is weaker for them: `--memory-swap`
-(the test host may have no swap at all), the `/work` and CA bind mounts
-(the tests show what is *not* visible, not that removing the flag changes
-it), `--init`, `--rm`, `--workdir`.
+(the test host may have no swap at all), the `/work` and CA bind mounts (the
+tests show what is *not* visible, not that removing the flag changes it),
+`--init`, `--rm`, `--workdir`.
 
 ## Docker Desktop on a Mac
 
