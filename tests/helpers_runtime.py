@@ -119,6 +119,10 @@ class System:
     def handle(self, sid):
         return self.env.client.get_workflow_handle_for(AgentSession.run, sid)
 
+    async def idle(self, sid) -> bool:
+        """True when the session has no activity running, i.e. it holds no worker."""
+        return not (await self.handle(sid).describe()).raw_description.pending_activities
+
     async def _is(self, sid, step):
         return await self.handle(sid).query(AgentSession.open_step) == step
 

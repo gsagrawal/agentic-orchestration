@@ -47,8 +47,8 @@ async def test_waiting_sessions_hold_no_worker(env, tmp_path):
     async with System(env, tmp_path, "q-s7-b", worker_options={"max_concurrent_activities": 1}) as s:
         waiting = [await s.start("asker") for _ in range(3)]
         for sid in waiting:
-            await wait_until(lambda sid=sid: s._is(sid, 0))
-            assert not (await s.handle(sid).describe()).raw_description.pending_activities
+            await wait_until(lambda sid=sid: s._is(sid, 0))  # open_step is set before request_human ends,
+            await wait_until(lambda sid=sid: s.idle(sid))  # so wait for the notification activity to drain
         busy = await s.start("mailer")
         assert (await s.handle(busy).result()).status == "finished"  # ran while three sessions waited
         for sid in waiting:  # leave nothing running: orphans would stall time skipping in later tests
