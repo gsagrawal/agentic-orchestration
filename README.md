@@ -14,6 +14,7 @@ Choices and rejected alternatives: `DESIGN_CHOICES.md`.
 | `orchestrator/db.py` | SQLite connection, schema, transactions |
 | `orchestrator/state_table.py` | session-manager: the session state table |
 | `orchestrator/session_log.py` | session log with epoch-checked appends |
+| `orchestrator/session_manager.py` | agent-session-manager: admission, assignment, reconciler loop |
 | `orchestrator/executor.py` | agent-executor: replay, loop, worker process |
 | `orchestrator/scripted_model.py` | scripted model (faked LLM) |
 | `orchestrator/agent_store.py` | agent definitions from a JSON file (faked) |

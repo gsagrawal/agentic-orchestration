@@ -19,3 +19,15 @@ class SessionClosed(Exception):
 
 class KeyConflict(Exception):
     """An idempotency key was reused for a different tool or different arguments. A caller bug."""
+
+
+class QuotaExceeded(Exception):
+    """Admission refused: the tenant already has its maximum number of live sessions."""
+
+
+class BudgetExceeded(Exception):
+    """Admission refused: the rollup job has flagged the tenant as over budget."""
+
+
+class UnknownAgent(Exception):
+    """No agent definition with this id."""

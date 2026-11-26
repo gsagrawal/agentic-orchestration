@@ -56,3 +56,17 @@ Open item (decide in step 7): `append()` checks only the epoch, so the last hold
 Open items from step 3 review:
 - An unexpected exception (bad agent id, unknown tool, the step-6 placeholder) kills the whole worker, and every session on it. Deliberate for now: swallowing it would make a broken session spin silently. Revisit with the reconciler (step 5) and caps (step 7).
 - A resumed `waiting` session would be released again immediately. Step 7 must add a human-response log entry and make `advance()` check for it before releasing.
+
+## Step 4: session manager
+
+| # | Choice | Rejected alternative | Why |
+|---|--------|----------------------|-----|
+| 32 | Callers see only a `SessionEngine` Protocol (`start_session`, `get_status`); the table + reconciler class implements it. | A concrete class used directly. | Decision 7: swapping in a workflow engine must not touch callers. Kept to two methods now; it grows as features land. |
+| 33 | Quota counts every non-terminal session (`created`, `running`, `waiting`). | Count only `running`. | A waiting session still holds a row and will want an executor again; otherwise a tenant could pile up unlimited waiting sessions. Cost: a tenant with many sessions waiting for humans can block itself. |
+| 34 | Quota check, budget check and insert are one `BEGIN IMMEDIATE` transaction. | Check, then insert. | Two concurrent admissions could both take the last slot. A thread race test fails without the transaction. |
+| 35 | Budget is a flag in `tenant_budget` that admission only reads; the rollup job that would write it is not built. | Sum usage at admission. | Decision 6. Tests set the flag directly. |
+| 36 | `run_deadline` is set at admission (now + limit). Defaults (`step_cap=50`, limit 300 s, 10 sessions per tenant) are assumptions, not measured. | Derive from data. | There is no data yet; labelled as assumptions in code. |
+| 37 | Executors register themselves in an `executors` table; the manager assigns to the least-loaded one (fewest running sessions, ties by id). | Round robin; static executor list. | Least-loaded needs no extra state and spreads evenly after a failure moves sessions. No capacity limit per executor yet. |
+| 38 | With no executor registered, sessions stay `created` and the reconciler retries. | Reject admission. | Admission is about the tenant's limits; capacity is the scheduler's problem. |
+| 39 | The pinned version is the agent's highest version at admission. | Caller chooses the version. | Matches the architecture ("pins the Session to the Agent's current version"). |
+| 40 | `reconcile_once()` is the single place that assigns; step 5 extends it to dead executors. Assumes one manager process (no leader election). | Assign inside `start_session`. | One code path for first assignment and for recovery, so it is tested once. |
