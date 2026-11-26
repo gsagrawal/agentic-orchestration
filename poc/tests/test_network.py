@@ -1,4 +1,5 @@
 """Network: the sandbox reaches only the proxy, and the proxy enforces who, where, and how often."""
+import json
 import subprocess
 import threading
 import time
@@ -7,6 +8,7 @@ from conftest import AUDIT_LOG, STATE, STUB_LOG, fetch, lines, py
 from agent_network_proxy.registry import Caller
 
 GITHUB = "https://api.github.test/user"
+SECRET = json.loads((STATE.parent / "config" / "secrets.json").read_text())["tenant-a"]["github"]
 
 
 def _stub_ip():
@@ -165,3 +167,45 @@ def test_stopping_a_sandbox_removes_its_network(proxied):
     assert nets()
     ctl.stop(sbx)
     assert not nets()
+
+
+def test_a_corrupt_registry_denies_everything(proxied):
+    # The proxy's own failure handling must not depend on the thing that failed.
+    ctl, sbx = proxied()
+    path = proxied.registry.path
+    good = path.read_text()
+    path.write_text("{ this is not json")
+    try:
+        before = len(lines(STUB_LOG))
+        out = fetch(ctl, sbx, GITHUB).stdout
+        assert "HTTPError" in out or "Tunnel connection failed" in out      # denied: no 200
+        assert len(lines(STUB_LOG)) == before                               # nothing reached the destination
+        assert "Tunnel connection failed: 200" not in out
+    finally:
+        path.write_text(good)
+
+
+def test_query_strings_are_left_alone_except_for_the_placeholder(proxied):
+    ctl, sbx = proxied()
+    before = len(lines(STUB_LOG))
+    fetch(ctl, sbx, GITHUB + "?label=a&label=b&q=x%20y")
+    fetch(ctl, sbx, GITHUB + "?access_token=placeholder-github-token")
+    first, second = [r["path"] for r in lines(STUB_LOG)[before:]]
+    assert first == "/user?label=a&label=b&q=x%20y"                  # repeated keys and encoding untouched
+    assert second == f"/user?access_token={SECRET}"                  # the placeholder in a query IS swapped
+
+
+def test_a_comma_in_the_workdir_cannot_inject_mount_options(make_sandbox, tmp_path):
+    import pytest
+    from sandbox_controller import SandboxError
+    with pytest.raises(SandboxError, match="workdir path"):
+        make_sandbox(tmp_path / "a,readonly=false")
+
+
+def test_reap_clears_what_a_crashed_controller_left_behind(proxied, tmp_path):
+    from sandbox_controller import SandboxController
+    ctl, sbx = proxied()
+    SandboxController().reap()          # a fresh controller that knows nothing about the proxy or this sandbox
+    labelled = lambda *a: subprocess.run(["docker", *a, "--filter", "label=agent-sandbox=1", "-q"],
+                                         capture_output=True, text=True).stdout.split()
+    assert not labelled("ps", "-a") and not labelled("network", "ls")

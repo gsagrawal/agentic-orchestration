@@ -9,7 +9,7 @@ containers. Design context: [../docs/service-architecture.md](../docs/service-ar
 ```bash
 pip install pytest      # the only host dependency besides Docker and Python 3.10+
 make demo               # scripted agent: pandoc, a credentialed call, a denied call, an escape attempt
-make test               # 50 tests, ~80 s
+make test               # 56 tests, ~80 s
 make bench              # cold start, 50 runs per configuration
 make down               # stop the proxy and stub
 ```
@@ -68,7 +68,8 @@ Not present at all: session-manager, ingress, auth, llm-gateway, object store, r
 | Direct request to the stub fails; no internet, no DNS | `test_direct_request_to_the_stub_fails`, `test_no_route_to_the_internet_and_no_dns` |
 | One sandbox cannot reach another; networks are cleaned up | `test_sandboxes_cannot_reach_each_other`, `test_stopping_a_sandbox_removes_its_network` |
 | Plaintext HTTP and ungranted ports are not forwarded | `test_plaintext_http_and_other_ports_are_not_forwarded` |
-| A proxy error denies rather than forwards | `test_a_policy_error_denies_instead_of_forwarding` |
+| A proxy error denies rather than forwards, even with a corrupt registry | `test_a_policy_error_denies_instead_of_forwarding`, `test_a_corrupt_registry_denies_everything` |
+| Query strings pass through untouched except for the placeholder | `test_query_strings_are_left_alone_except_for_the_placeholder` |
 | Failed upstream calls are still audited | `test_a_failed_upstream_call_is_still_audited` |
 | Agent/tenant mismatch refused (controller and proxy) | `test_controller_refuses_an_agent_tenant_mismatch`, `test_proxy_rejects_an_agent_tenant_mismatch` |
 | Scrubbing leaves repeated headers and HEAD responses intact | `test_response_scrubbing_keeps_headers_intact` |
@@ -81,12 +82,13 @@ Not present at all: session-manager, ingress, auth, llm-gateway, object store, r
 | Rate limit | `test_rate_limit_is_per_tenant_and_a_window` |
 | Stale epoch rejected; new epoch stops the old sandbox | `test_zombie_with_a_stale_epoch_is_rejected_by_the_proxy`, `test_new_epoch_stops_the_old_sandbox`, `test_stale_epoch_cannot_start_a_sandbox` |
 | Pinned-certificate tool fails closed, no credential | `test_a_tool_that_pins_the_certificate_fails_closed_with_no_credential` |
-| Executor: grants, step cap, lazy sandbox, log, session deadline, lost-sandbox replacement, no-proxy controller | `tests/test_executor.py` |
+| Executor: grants, step cap, lazy sandbox, log, session deadline, lost-sandbox replacement, no-proxy controller, no leak on unexpected failure, rejects tools it cannot run | `tests/test_executor.py` |
+| Controller refuses: a comma in the workdir, one env var for two placeholders | `test_a_comma_in_the_workdir_cannot_inject_mount_options`, `test_one_env_var_cannot_stand_for_two_different_placeholders` |
 
 Cold start (measured; see [docs/cold-start.md](docs/cold-start.md) for the table and caveats): a fresh
-sandbox is ready in about 0.25 s (no proxy) to 0.31 s (proxied) at p50, p95 0.27–0.33 s, on a
-Linux VM. Pandoc in the image made no measurable difference to start time. These are local-image
-numbers: no pull, no Kubernetes.
+sandbox is ready in about 0.24-0.26 s without the proxy and about 0.36 s through it at p50 (p95 0.26-0.28 s and
+0.41 s), on a Linux VM. Stopping a proxied sandbox takes about 0.35 s. Pandoc in the image made no measurable
+difference to start time. These are local-image numbers: no pull, no Kubernetes, and run-to-run variation is about 10%.
 
 ## What is not built (gaps)
 
@@ -102,11 +104,12 @@ numbers: no pull, no Kubernetes.
 - Placeholder swap covers headers and query string, not bodies. Response scrubbing is exact-match only: an encoded or transformed echo of a secret gets through (AUDIT-1).
 - The proxy trusts only the stub's self-signed cert upstream, has one CA for all tenants, and keeps its key on disk (D21, D22).
 - Rate limit is in the memory of one proxy; N replicas would allow N times the limit.
-- The audit log is a local file with no append-only enforcement, retention or tamper evidence; the registry's epoch table is never pruned.
+- The audit log is a local file with no append-only enforcement, retention or tamper evidence; the registry's epoch table is never pruned, and its lock is a single-host `flock`.
 
 **Platform**
+- **Concurrent sandboxes are capped by Docker's address pools.** Each sandbox has its own network, and on this host the daemon refused the 26th one (`all predefined address pools have been fully subnetted`), measured with otherwise-default settings. A daemon with larger `default-address-pools` raises it; on Kubernetes a NetworkPolicy replaces the per-sandbox network and the limit goes away. Nothing in the PoC works around this.
 - **Kubernetes:** none. The controller drives Docker, and holds `exec` as well (D5); on Kubernetes the network rule becomes a NetworkPolicy and the executor would reach the sandbox itself.
-- No size limit on the work dir; no object-store restore/flush.
+- No size limit on the work dir, which must be dedicated to its sandbox (the controller makes it world-writable); no object-store restore/flush.
 - Durability: the session log is written but there is no resume, no heartbeat, no reconciler. The controller's session map is in memory.
 - Single process, no concurrency control. Nothing here shows the 1000-agent / 10k-calls-per-minute target.
 - No usage metering, cost rollup or tracing.

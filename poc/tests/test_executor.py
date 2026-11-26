@@ -1,5 +1,6 @@
 """agent-executor stub: grants, step cap, lazy sandbox, session log."""
 import json
+import subprocess
 import uuid
 import subprocess
 
@@ -75,3 +76,31 @@ def test_a_lost_sandbox_is_replaced_and_the_unstarted_command_runs_once(proxied,
                      [ToolCall("bash", "sleep 5"), ToolCall("bash", "echo recovered")], tmp_path / "wd")
     assert results[0]["result"]["exit_code"] != 0 and not results[0]["result"]["timed_out"]   # died mid-run: reported, not retried
     assert results[1]["result"]["stdout"] == "recovered\n"                                   # next step got a fresh sandbox
+
+
+def _labelled():
+    """Every sandbox container and sandbox network that currently exists."""
+    docker = lambda *a: set(subprocess.run(["docker", *a, "--filter", "label=agent-sandbox=1", "-q"],
+                                           capture_output=True, text=True).stdout.split())
+    return docker("ps", "-a"), docker("network", "ls")
+
+
+def test_an_unexpected_failure_does_not_leak_the_sandbox(proxied, tmp_path, monkeypatch):
+    ctl, ex = _executor(proxied, tmp_path)
+    def boom(*a, **kw):
+        raise OSError("docker client vanished")
+    monkeypatch.setattr(ctl, "exec", boom)
+    before = _labelled()
+    results = ex.run(Caller(f"s-leak-{uuid.uuid4().hex[:8]}", "agent-a", "tenant-a", 1),
+                     [ToolCall("bash", "true"), ToolCall("bash", "true")], tmp_path / "wd")
+    assert all("docker client vanished" in r["result"]["error"] for r in results)    # reported, not raised
+    assert _labelled() == before          # the sandbox the executor created is stopped and its network removed
+
+
+def test_a_tool_the_executor_cannot_run_is_rejected_up_front(tmp_path):
+    import pytest
+    from sandbox_controller import SandboxController
+    grants = tmp_path / "grants.json"
+    grants.write_text(json.dumps({"agents": {"a": {"tenant": "t", "tools": ["bash", "perl"], "destinations": {}}}}))
+    with pytest.raises(ValueError, match="perl"):
+        AgentExecutor(SandboxController(), grants, tmp_path / "log").run(Caller("s", "a", "t", 1), [], tmp_path / "wd")

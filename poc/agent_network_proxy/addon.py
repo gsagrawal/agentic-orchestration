@@ -109,8 +109,9 @@ class Gatekeeper:
         self._audit(flow, caller, "allow", None, grant["credential"], None)   # before the credential is used
         placeholder, real = grant["placeholder"].encode(), secret.encode()
         flow.request.headers.fields = tuple((k, v.replace(placeholder, real)) for k, v in flow.request.headers.fields)
-        for name, value in list(flow.request.query.items()):
-            flow.request.query[name] = value.replace(grant["placeholder"], secret)
+        pairs = flow.request.query.items(multi=True)
+        if any(grant["placeholder"] in value for _, value in pairs):      # touch the query only if it carries the placeholder
+            flow.request.query = [(k, v.replace(grant["placeholder"], secret)) for k, v in pairs]
         flow.metadata.update(caller=caller, credential=grant["credential"], secret=secret)
 
     @fail_closed
@@ -137,8 +138,15 @@ class Gatekeeper:
     # -- helpers -----------------------------------------------------------
 
     def _caller(self, flow):
-        found = flow.metadata.get("caller") or self.registry.lookup(flow.client_conn.peername[0])
-        return found[0] if isinstance(found, tuple) else found
+        """Best-effort identity for a log line. Never raises: it runs inside failure handlers, and a handler
+        that fails would let the request through."""
+        try:
+            if caller := flow.metadata.get("caller"):
+                return caller
+            found = self.registry.lookup(flow.client_conn.peername[0])
+            return found[0] if found else None
+        except Exception:  # noqa: BLE001
+            return None
 
     def _audit_failure(self, flow) -> None:
         if flow.metadata.get("denied"):

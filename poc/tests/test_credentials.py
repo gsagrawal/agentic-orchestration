@@ -2,6 +2,7 @@
 import json
 import re
 
+from agent_network_proxy.registry import Caller
 from conftest import AUDIT_LOG, STATE, STUB_LOG, fetch, lines, py, sh
 
 SECRETS = json.loads((STATE.parent / "config" / "secrets.json").read_text())
@@ -105,3 +106,17 @@ def test_response_scrubbing_keeps_headers_intact(proxied):
         "print(u.urlopen(u.Request('https://api.github.test/headers', method='HEAD'), timeout=8).headers.get('Content-Length'))")
     out = py(ctl, sbx, code).stdout.splitlines()
     assert out == ["['a=1', 'b=2']", "Bearer [REDACTED]", "b'hello'", "5"]   # both cookies, echo scrubbed, HEAD length kept
+
+
+def test_one_env_var_cannot_stand_for_two_different_placeholders(tmp_path):
+    import pytest
+    from agent_network_proxy.registry import Registry
+    from sandbox_controller import ProxyConfig, SandboxController, SandboxError
+    grants = tmp_path / "grants.json"
+    d = lambda ph: {"credential": "c", "env_var": "GH_TOKEN", "placeholder": ph}
+    grants.write_text(json.dumps({"agents": {"a": {"tenant": "t", "tools": ["bash"],
+                                                    "destinations": {"x.test": d("ph-one"), "y.test": d("ph-two")}}}}))
+    ctl = SandboxController(proxy=ProxyConfig("http://proxy:8080", STATE / "proxy-conf" / "mitmproxy-ca-cert.pem",
+                                              Registry(tmp_path / "reg.json"), grants))
+    with pytest.raises(SandboxError, match="GH_TOKEN"):
+        ctl.create(tmp_path / "wd", Caller("s", "a", "t", 1))

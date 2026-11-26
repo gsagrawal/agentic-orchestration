@@ -15,14 +15,19 @@ case "$(docker info --format '{{.Architecture}}')" in
   *) echo "unsupported docker architecture" >&2; exit 1 ;;
 esac
 
+sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi; }
+
+# The download is cached per version and architecture, and re-verified on every build, so a stale or
+# swapped binary (e.g. after switching Docker context from amd64 to arm64) cannot reach the image.
 mkdir -p build
-if [ ! -x build/pandoc ]; then
-  tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
-  curl -fsSL -o "$tmp/pandoc.tgz" "${BASE}/pandoc-${VERSION}-linux-${ARCH}.tar.gz"
-  echo "${SHA}  $tmp/pandoc.tgz" | shasum -a 256 -c -
-  tar -xzf "$tmp/pandoc.tgz" -C "$tmp"
-  install -m 0755 "$tmp/pandoc-${VERSION}/bin/pandoc" build/pandoc
+TGZ="build/pandoc-${VERSION}-${ARCH}.tgz"
+[ -f "$TGZ" ] || curl -fsSL -o "$TGZ" "${BASE}/pandoc-${VERSION}-linux-${ARCH}.tar.gz"
+if [ "$(sha256 "$TGZ" | cut -d' ' -f1)" != "$SHA" ]; then
+  echo "checksum mismatch for $TGZ (expected $SHA)" >&2; rm -f "$TGZ"; exit 1
 fi
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+tar -xzf "$TGZ" -C "$tmp"
+install -m 0755 "$tmp/pandoc-${VERSION}/bin/pandoc" build/pandoc
 BASE_ARG="--build-arg BASE=${SANDBOX_BASE:-mirror.gcr.io/library/python:3.12-slim-bookworm}"
 docker build $BASE_ARG --target full -t "$IMAGE" .
 docker build $BASE_ARG --target base -t "${IMAGE}-nopandoc" .

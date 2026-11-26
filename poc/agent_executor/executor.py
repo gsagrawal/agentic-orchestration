@@ -16,9 +16,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from agent_network_proxy.registry import Caller
-from sandbox_controller import Limits, SandboxController, SandboxGone
+from sandbox_controller import Limits, Sandbox, SandboxController, SandboxError, SandboxGone
 
 INTERPRETERS = {"bash": ["bash", "-c"], "python": ["python3", "-c"]}
+
+
+@dataclass
+class _Session:
+    sandbox: Sandbox | None = None
 
 
 @dataclass(frozen=True)
@@ -38,44 +43,49 @@ class AgentExecutor:
         agent = json.loads(self.grants_path.read_text())["agents"][caller.agent]
         if agent["tenant"] != caller.tenant:
             raise ValueError(f"agent {caller.agent} belongs to {agent['tenant']}, not {caller.tenant}")
+        if unknown := set(agent["tools"]) - set(INTERPRETERS):
+            raise ValueError(f"agent {caller.agent} is granted tools this executor cannot run: {sorted(unknown)}")
         session_end = time.monotonic() + self.deadline_s       # the session's deadline bounds everything below
-        sandbox, results = None, []
+        session = _Session()
+        results = []
         try:
             for step, call in enumerate(script, start=1):
-                remaining = session_end - time.monotonic()
                 if step > self.step_cap:
                     results.append(self._log(caller, step, call, {"error": "step cap reached"}))
                     break
-                if remaining <= 0:
+                if time.monotonic() >= session_end:
                     results.append(self._log(caller, step, call, {"error": "session deadline reached"}))
                     break
                 if call.tool not in agent["tools"]:
                     results.append(self._log(caller, step, call, {"error": f"tool '{call.tool}' not granted"}))
                     continue
-                sandbox, result = self._run_step(sandbox, caller, call, workdir, session_end)
+                try:
+                    result = self._run_step(session, caller, call, workdir, session_end)
+                except (SandboxError, OSError) as exc:      # infrastructure failure: report it, keep the results so far
+                    result = {"error": f"{type(exc).__name__}: {exc}"}
                 results.append(self._log(caller, step, call, result))
         finally:
-            if sandbox is not None and sandbox.alive:
-                self.controller.stop(sandbox)
+            if session.sandbox is not None and session.sandbox.alive:
+                self.controller.stop(session.sandbox)
         return results
 
-    def _run_step(self, sandbox, caller, call, workdir, session_end):
-        """Run one call. A sandbox that has vanished (so the command never started) is replaced, once."""
+    def _run_step(self, session: "_Session", caller: Caller, call: ToolCall, workdir: Path, session_end: float) -> dict:
+        """Run one call. A sandbox that has vanished (so the command never started) is replaced, once.
+        The sandbox is recorded on `session` the moment it exists, so run() can always clean it up."""
         for attempt in (1, 2):
-            remaining = session_end - time.monotonic()
-            if attempt == 2 and remaining <= 0:       # the first attempt was checked by run(); a replacement must be too
-                return sandbox, {"error": "session deadline reached"}
-            if sandbox is None or not sandbox.alive:             # lazy: only a call that needs code pays for a sandbox
-                lifetime = max(1, math.ceil(min(self.limits.deadline_s, remaining)))
-                sandbox = self.controller.create(workdir, caller, dataclasses.replace(self.limits, deadline_s=lifetime))
+            if session.sandbox is None or not session.sandbox.alive:    # lazy: only a call that needs code pays for one
+                lifetime = max(1, math.ceil(min(self.limits.deadline_s, session_end - time.monotonic())))
+                session.sandbox = self.controller.create(workdir, caller, dataclasses.replace(self.limits, deadline_s=lifetime))
+            remaining = session_end - time.monotonic()                 # after creation: creating a sandbox takes time
+            if remaining <= 0:
+                return {"error": "session deadline reached"}
             try:
-                r = self.controller.exec(sandbox, [*INTERPRETERS[call.tool], call.code], min(self.timeout_s, remaining))
+                r = self.controller.exec(session.sandbox, [*INTERPRETERS[call.tool], call.code], min(self.timeout_s, remaining))
             except SandboxGone:
-                sandbox = None
                 continue
-            return sandbox, {"exit_code": r.exit_code, "stdout": r.stdout, "stderr": r.stderr,
-                             "timed_out": r.timed_out, "duration_s": round(r.duration_s, 3)}
-        return sandbox, {"error": "sandbox kept disappearing"}
+            return {"exit_code": r.exit_code, "stdout": r.stdout, "stderr": r.stderr,
+                    "timed_out": r.timed_out, "duration_s": round(r.duration_s, 3)}
+        return {"error": "sandbox kept disappearing"}
 
     def _log(self, caller: Caller, step: int, call: ToolCall, result: dict) -> dict:
         record = {"ts": time.time(), "session": caller.session, "agent": caller.agent,

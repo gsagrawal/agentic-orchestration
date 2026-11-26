@@ -1,9 +1,11 @@
 """Measure sandbox cold start. `make bench`.
 
 Cold start = from asking the controller for a sandbox until the first command
-in it has returned. Reported as create (docker run + network attach + registry)
-and first-exec (docker exec of `true`). Each run uses a fresh sandbox and a
-fresh work dir. Percentiles are nearest-rank over N runs.
+in it has returned. Reported as create (docker run + network create/attach +
+registry), first exec (docker exec of `true`) and total. Teardown is reported
+separately as `stop` (kill, wait until gone, remove the network): it is not part
+of cold start but decides how fast a slot can be reused. Each run uses a fresh
+sandbox and a fresh work dir. Percentiles are nearest-rank over N runs.
 """
 import argparse
 import math
@@ -36,7 +38,7 @@ def measure(image, proxied, runs):
         proxy = ProxyConfig("http://proxy:8080", STATE / "proxy-conf" / "mitmproxy-ca-cert.pem",
                             Registry(STATE / "registry" / "registry.json"), ROOT / "config" / "grants.json")
     ctl = SandboxController(image=image, proxy=proxy)
-    create, first, total = [], [], []
+    create, first, total, stop = [], [], [], []
     with tempfile.TemporaryDirectory() as tmp:
         for i in range(runs + 1):                     # run 0 is a warm-up (image/layer caches) and is discarded
             caller = Caller(f"bench-{time.time_ns()}", "agent-a", "tenant-a", 1) if proxied else None
@@ -46,9 +48,10 @@ def measure(image, proxied, runs):
             ctl.exec(sbx, ["true"])
             t2 = time.monotonic()
             ctl.stop(sbx)
+            t3 = time.monotonic()
             if i:
-                create.append(t1 - t0); first.append(t2 - t1); total.append(t2 - t0)
-    return create, first, total
+                create.append(t1 - t0); first.append(t2 - t1); total.append(t2 - t0); stop.append(t3 - t2)
+    return create, first, total, stop
 
 
 def main():
@@ -63,8 +66,8 @@ def main():
     print("| image | network | metric | min | p50 | p95 | max |\n|---|---|---|---|---|---|---|")
     for image in ("agent-sandbox:poc-nopandoc", "agent-sandbox:poc"):
         for proxied in (False, True):
-            net = "proxied (internal net + registry)" if proxied else "none"
-            for metric, xs in zip(("create", "first exec", "total"), measure(image, proxied, n)):
+            net = "proxied (own internal net + registry)" if proxied else "none"
+            for metric, xs in zip(("create", "first exec", "total", "stop"), measure(image, proxied, n)):
                 print(f"| {image.split(':')[1]} | {net} | {metric} | {min(xs):.3f} | {statistics.median(xs):.3f} "
                       f"| {pct(xs, 95):.3f} | {max(xs):.3f} |")
             sys.stdout.flush()
