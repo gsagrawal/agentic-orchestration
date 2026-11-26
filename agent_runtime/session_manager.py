@@ -12,7 +12,7 @@ from temporalio.client import Client, WorkflowExecutionStatus
 
 from agent_runtime.agent_store import DEFAULT_PATH, load_agent
 from agent_runtime.db import txn
-from agent_runtime.models import TASK_QUEUE, SessionInput
+from agent_runtime.models import TASK_QUEUE, MessageSignal, ReplySignal, SessionInput
 from agent_runtime.workflow import AgentSession
 
 SCHEMA = """
@@ -31,6 +31,18 @@ class QuotaExceeded(Exception):
 
 class UnknownSession(Exception):
     """No such session for this tenant. Also used for another tenant's session: do not leak it."""
+
+
+class NotResponder(Exception):
+    """The caller is in the right tenant but is not the user who started the session."""
+
+
+class SessionClosed(Exception):
+    """The session has ended (finished, expired, stopped, timed out): "gone"."""
+
+
+class NotOpenStep(Exception):
+    """The session is not waiting at the step this reply is for."""
 
 
 @dataclass
@@ -90,3 +102,35 @@ class SessionManager:
             if desc.status != WorkflowExecutionStatus.RUNNING:
                 with txn(self._db) as c:
                     c.execute("UPDATE sessions SET active = 0 WHERE session_id = ?", (session_id,))
+
+    # ---- interaction with a running session ----
+
+    async def reply(self, tenant: str, user: str, session_id: str, step: int, text: str) -> None:
+        handle = await self._open_handle(tenant, user, session_id)
+        if await handle.query(AgentSession.open_step) != step:
+            raise NotOpenStep(f"session {session_id} is not waiting at step {step}")
+        await handle.signal(AgentSession.reply, ReplySignal(step, text))
+        # Between the query and the signal the step can close. The workflow is the authority: it
+        # drops a reply that is not for its open step, so a late or duplicate reply is harmless.
+
+    async def message(self, tenant: str, user: str, session_id: str, message_id: str, text: str) -> None:
+        handle = await self._open_handle(tenant, user, session_id)
+        await handle.signal(AgentSession.message, MessageSignal(message_id, text))
+
+    async def stop(self, tenant: str, user: str, session_id: str) -> None:
+        handle = await self._open_handle(tenant, user, session_id)
+        await handle.signal(AgentSession.stop)
+
+    async def _open_handle(self, tenant: str, user: str, session_id: str):
+        """Tenant check, then responder check, then 'is it still running'. Order matters: another
+        tenant's session must look like it does not exist."""
+        with txn(self._db) as c:
+            row = c.execute("SELECT tenant, user FROM sessions WHERE session_id = ?", (session_id,)).fetchone()
+        if row is None or row[0] != tenant:
+            raise UnknownSession(session_id)
+        if row[1] != user:
+            raise NotResponder(session_id)
+        handle = self._client.get_workflow_handle(session_id)
+        if (await handle.describe()).status != WorkflowExecutionStatus.RUNNING:
+            raise SessionClosed(session_id)
+        return handle

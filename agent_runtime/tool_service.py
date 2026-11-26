@@ -81,6 +81,7 @@ class EffectsLedger:
 
 class ToolService:
     def __init__(self, path: str, tools: FakeTools | None = None, specs: dict[str, ToolSpec] | None = None):
+        self.path = path
         self._path = path
         self._tools = tools or FakeTools()
         self._specs = specs or FakeTools.SPECS

@@ -17,6 +17,7 @@ class AgentVersion:
     step_cap: int
     script: list[dict]  # FAKED model: the steps it will take, see scripted_model.py
     loop: bool = False  # FAKED model: repeat the script forever (the "poison" agent)
+    wait_expiry_s: float = 86400.0  # how long a session may wait for a human (the waiting timer)
 
 
 @dataclass
@@ -29,7 +30,7 @@ class SessionInput:
 
 @dataclass
 class SessionResult:
-    status: str  # "finished" or "step_cap"
+    status: str  # "finished", "step_cap", "stopped" or "expired"
     steps: int
     history: list[dict] = field(default_factory=list)
 
@@ -49,3 +50,22 @@ class ToolCall:
     step: int
     tool: str
     args: dict
+
+
+@dataclass
+class HumanRequest:
+    session_id: str
+    step: int
+    question: str
+
+
+@dataclass
+class ReplySignal:
+    step: int  # the step that asked; a reply for any other step is ignored
+    text: str
+
+
+@dataclass
+class MessageSignal:
+    message_id: str  # a repeated id is dropped
+    text: str

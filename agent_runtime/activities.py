@@ -8,20 +8,29 @@ import asyncio
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from agent_runtime.models import ModelRequest, ToolCall
+from agent_runtime.models import HumanRequest, ModelRequest, ToolCall
+from agent_runtime.notifier import FakeNotifier
 from agent_runtime.sandbox import FakeSandboxController
-from agent_runtime.scripted_model import next_action
+from agent_runtime.scripted_model import ScriptedModel
 from agent_runtime.tool_service import StaleAttempt, ToolService
 
 
 class Activities:
-    def __init__(self, tool_service: ToolService, sandbox: FakeSandboxController):
+    def __init__(
+        self,
+        tool_service: ToolService,
+        sandbox: FakeSandboxController,
+        notifier: FakeNotifier | None = None,
+        model: ScriptedModel | None = None,
+    ):
         self._tools = tool_service
         self._sandbox = sandbox
+        self._notifier = notifier or FakeNotifier(tool_service.path + ".notifier")
+        self._model = model or ScriptedModel()
 
     @activity.defn
     async def call_model(self, req: ModelRequest) -> dict:
-        return next_action(req.script, req.loop, req.step)
+        return self._model.call(req)
 
     @activity.defn
     async def ensure_sandbox(self, session_id: str) -> bool:
@@ -45,6 +54,18 @@ class Activities:
             raise ApplicationError(str(e), type="StaleAttempt", non_retryable=True)
         return {"status": result.status, "value": result.value}
 
+    @activity.defn
+    async def request_human(self, req: HumanRequest) -> bool:
+        """Sends the notification once per (session, step); a retry finds the key and sends nothing."""
+        return self._notifier.notify(f"{req.session_id}:{req.step}", req.question)
+
+    @activity.defn
+    async def mark_expired(self, session_id: str) -> None:
+        self._notifier.expire(session_id)
+
     @property
     def all(self):
-        return [self.call_model, self.ensure_sandbox, self.stop_sandbox, self.run_tool]
+        return [
+            self.call_model, self.ensure_sandbox, self.stop_sandbox, self.run_tool,
+            self.request_human, self.mark_expired,
+        ]
