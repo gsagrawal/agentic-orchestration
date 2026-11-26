@@ -10,17 +10,19 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import subprocess
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from agent_network_proxy.registry import Caller, Registry
 
 LABEL = "agent-sandbox=1"
-WORKDIR_MARKER = ".agent-sandbox-workdir"   # says "a sandbox controller created this directory for a sandbox"
+WORKDIR_MARKER = ".agent-sandbox-workdir"   # says "a sandbox controller created this directory, for this session"
+PENDING_TTL_S = 60   # how long a claim on a session, made before its sandbox exists, protects it
 
 
 # All defaults are ASSUMPTIONS, not measurements. See docs/design-choices.md.
@@ -92,18 +94,17 @@ class SandboxController:
             self._check_mount_path(Path(self.proxy.ca_cert).resolve(), "ca_cert")
         if self.proxy and caller is None:
             raise SandboxError("a proxied sandbox needs a caller identity to register")
-        if workdir.exists() and any(workdir.iterdir()) and not (workdir / WORKDIR_MARKER).exists():
-            raise SandboxError(f"workdir {workdir} is not dedicated to a sandbox: it exists, is not empty, and was not "
-                               "created by a sandbox controller (its mode would be changed to 0777 and it would be mounted writable)")
+        owner = caller.key if caller else "-"
+        self._check_workdir(workdir, owner)
         env = self._placeholder_env(caller) if self.proxy else {}   # all validation happens before anything is fenced or created
-        if caller:
-            self._fence(caller)
-        workdir.mkdir(parents=True, exist_ok=True)
-        (workdir / WORKDIR_MARKER).touch()
-        workdir.chmod(0o777)
         name = f"sbx-{uuid.uuid4().hex[:12]}"
+        if caller:
+            self._fence(caller, name)
         sandbox = Sandbox(name=name, workdir=workdir, limits=limits, caller=caller)
         try:
+            workdir.mkdir(parents=True, exist_ok=True)
+            self._mark_workdir(workdir, owner)
+            workdir.chmod(0o777)
             if self.proxy:
                 sandbox.network = f"agentpoc_{name}"
                 self._docker(["network", "create", "--internal", "--label", LABEL, sandbox.network], "create network")
@@ -114,14 +115,42 @@ class SandboxController:
                 sandbox.ip = self._docker(
                     ["inspect", "-f", f'{{{{(index .NetworkSettings.Networks "{sandbox.network}").IPAddress}}}}', name],
                     "inspect sandbox")
+                if not sandbox.ip:
+                    raise SandboxError(f"{name} has no address on its network (did it exit immediately?)")
                 self.proxy.registry.register(sandbox.ip, caller, name)
-        except Exception:
-            with contextlib.suppress(Exception):    # cleanup must not replace the error that got us here
+        except Exception as exc:
+            try:
                 self.stop(sandbox)
+            except Exception as cleanup:   # noqa: BLE001 - say what was left behind instead of hiding it
+                raise SandboxError(f"{exc}; ALSO cleaning up {name} (network {sandbox.network}) failed: {cleanup}. "
+                                   "Run reap() to remove it.") from exc
             raise
         if caller:
             self._by_session[caller.key] = sandbox
         return sandbox
+
+    @staticmethod
+    def _check_workdir(workdir: Path, owner: str) -> None:
+        """A directory that already holds files is only reused if a controller marked it for this same session.
+        The marker is inside the sandbox's own /work, so it is untrusted: it must be a regular file, not a symlink
+        (which would make the host follow it), and it names the owner so one session cannot mount another's files."""
+        if not (workdir.exists() and any(workdir.iterdir())):
+            return
+        marker = workdir / WORKDIR_MARKER
+        if marker.is_symlink() or not marker.is_file():
+            raise SandboxError(f"workdir {workdir} is not dedicated to a sandbox: it exists, is not empty, and was not "
+                               "created by a sandbox controller (its mode would be changed to 0777 and it would be mounted writable)")
+        if marker.read_text() != owner:
+            raise SandboxError(f"workdir {workdir} belongs to {marker.read_text()!r}, not {owner!r}")
+
+    @staticmethod
+    def _mark_workdir(workdir: Path, owner: str) -> None:
+        marker = workdir / WORKDIR_MARKER
+        if not marker.is_symlink() and marker.exists():
+            return                                   # a resumed session: already checked by _check_workdir
+        fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+        with os.fdopen(fd, "w") as f:
+            f.write(owner)
 
     def _run_args(self, sandbox: Sandbox, user: str, env: dict[str, str]) -> list[str]:
         limits = sandbox.limits
@@ -248,29 +277,40 @@ class SandboxController:
         except (ValueError, KeyError, TypeError, AttributeError) as exc:    # unparsable or wrongly shaped grants
             raise SandboxError(f"cannot read the grants for {caller.agent}: {type(exc).__name__}: {exc}") from exc
 
-    def _fence(self, caller: Caller) -> None:
+    def _fence(self, caller: Caller, name: str) -> None:
         """A newer epoch supersedes older ones: their sandboxes are stopped. An older epoch is refused, and so is
-        an equal one while another sandbox for the session is alive (two sandboxes must never hold the session).
-        Both the in-memory map and the registry are consulted, so a restarted or second controller is fenced too.
-        Fencing happens before the new sandbox exists: if creating it then fails, the old one stays stopped and
-        the epoch stays raised, because the newer executor now owns the session and retries."""
+        an equal one while another sandbox for the session is alive: two sandboxes must never hold one session.
+        With a proxy, the check, the epoch bump and a claim on the session for `name` happen inside one registry
+        transaction, so two controllers racing for the same session cannot both win. Fencing happens before the
+        new sandbox exists: if creating it then fails, the old one stays stopped and the epoch stays raised,
+        because the newer executor now owns the session and retries."""
         old = self._by_session.get(caller.key)
         if old and caller.epoch <= old.caller.epoch:
-            raise SandboxError(f"stale epoch {caller.epoch} for session {caller.session} (current {old.caller.epoch})")
+            if caller.epoch == old.caller.epoch and not self._exists(old.name):
+                self.stop(old)                       # it expired on its own: the same epoch may start again
+                old = None
+            else:
+                raise SandboxError(f"stale epoch {caller.epoch} for session {caller.session} (current {old.caller.epoch})")
+        superseded: list[str] = []
         if self.proxy:
-            registry = self.proxy.registry
-            if caller.epoch < (newest := registry.newest_epoch(caller.key)):
-                raise SandboxError(f"stale epoch {caller.epoch} for session {caller.session} (registry has {newest})")
-            for name, epoch in registry.sandboxes(caller.key):
-                if old is not None and name == old.name:
-                    continue
-                if not self._exists(name):
-                    registry.unregister(name)                       # a stale entry for a sandbox that is gone
-                elif epoch >= caller.epoch:
-                    raise SandboxError(f"session {caller.session} already has a live sandbox {name} at epoch {epoch}")
-                else:
-                    self.stop(Sandbox(name=name, workdir=Path("."), limits=Limits(), network=f"agentpoc_{name}"))
-            registry.bump_epoch(caller.key, caller.epoch)       # fence at the proxy before anything else changes
+            with self.proxy.registry.transaction() as data:
+                if caller.epoch < (newest := data["epochs"].get(caller.key, 0)):
+                    raise SandboxError(f"stale epoch {caller.epoch} for session {caller.session} (registry has {newest})")
+                for ip, entry in list(data["callers"].items()):
+                    if f"{entry['tenant']}/{entry['session']}" != caller.key or (old is not None and entry["sandbox"] == old.name):
+                        continue
+                    claimed = "pending" in entry and time.time() - entry["pending"] < PENDING_TTL_S
+                    if claimed or self._exists(entry["sandbox"]):
+                        if entry["epoch"] >= caller.epoch:
+                            raise SandboxError(f"session {caller.session} already has a live sandbox "
+                                               f"{entry['sandbox']} at epoch {entry['epoch']}")
+                        superseded.append(entry["sandbox"])
+                    else:
+                        del data["callers"][ip]      # a stale entry for a sandbox that is gone
+                data["epochs"][caller.key] = max(caller.epoch, newest)
+                data["callers"][f"pending:{name}"] = {**asdict(caller), "sandbox": name, "pending": time.time()}
+        for victim in superseded:                    # slow docker work happens outside the lock
+            self.stop(Sandbox(name=victim, workdir=Path("."), limits=Limits(), network=f"agentpoc_{victim}"))
         if old:
             self.stop(old)
 

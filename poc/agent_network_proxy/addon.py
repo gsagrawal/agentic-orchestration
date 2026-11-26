@@ -14,6 +14,7 @@ fallback is switched off in docker-compose.yml (`rawtcp=false`); neither could b
 """
 from __future__ import annotations
 
+import base64
 import functools
 import json
 import os
@@ -46,6 +47,18 @@ class RateLimiter:
             return False
         hits.append(now)
         return True
+
+
+def swap(value: bytes, placeholder: bytes, real: bytes) -> bytes:
+    """Replace the placeholder in a header value, including inside HTTP Basic credentials (how git sends a token)."""
+    if value[:6].lower() == b"basic ":
+        try:
+            decoded = base64.b64decode(value[6:], validate=True)
+        except ValueError:
+            decoded = b""
+        if placeholder in decoded:
+            return value[:6] + base64.b64encode(decoded.replace(placeholder, real))
+    return value.replace(placeholder, real)
 
 
 def fail_closed(hook):
@@ -90,6 +103,9 @@ class Gatekeeper:
             return caller, None, "plaintext not permitted"
         if flow.request.headers.get("Upgrade") or "upgrade" in flow.request.headers.get("Connection", "").lower():
             return caller, None, "upgrade not permitted"      # WebSocket frames would bypass audit and scrubbing
+        placeholder = grant["placeholder"]
+        if placeholder in flow.request.path.split("?")[0] or placeholder.encode() in (flow.request.raw_content or b""):
+            return caller, None, "placeholder in an unsupported position"      # fail loudly: it would go out as a fake token
         if count_rate:
             rl = grants["tenants"][caller.tenant]["rate_limit"]
             if not self.limiter.allow(caller.tenant, rl["requests"], rl["per_seconds"]):
@@ -112,7 +128,7 @@ class Gatekeeper:
         secret = json.loads((CONFIG / "secrets.json").read_text())[caller.tenant][grant["credential"]]
         self._audit(flow, caller, "allow", None, grant["credential"], None)   # before the credential is used
         placeholder, real = grant["placeholder"].encode(), secret.encode()
-        flow.request.headers.fields = tuple((k, v.replace(placeholder, real)) for k, v in flow.request.headers.fields)
+        flow.request.headers.fields = tuple((k, swap(v, placeholder, real)) for k, v in flow.request.headers.fields)
         pairs = flow.request.query.items(multi=True)
         if any(grant["placeholder"] in value for _, value in pairs):      # touch the query only if it carries the placeholder
             flow.request.query = [(k, v.replace(grant["placeholder"], secret)) for k, v in pairs]

@@ -47,17 +47,24 @@ class Registry:
 
     def _read(self) -> dict:
         try:
-            return json.loads(self.path.read_text())
+            data = json.loads(self.path.read_text())
         except FileNotFoundError:
             return {"callers": {}, "epochs": {}}
         except json.JSONDecodeError as exc:
             raise RegistryError(f"{self.path} is not valid JSON: {exc}") from exc
+        if not (isinstance(data, dict) and isinstance(data.get("callers"), dict) and isinstance(data.get("epochs"), dict)):
+            raise RegistryError(f"{self.path} does not have the expected shape")
+        return data
 
-    def _update(self, change) -> None:
+    @contextlib.contextmanager
+    def transaction(self):
+        """Hold the exclusive lock, yield the registry data to inspect and change, and write it back atomically
+        when the block ends normally. An exception inside the block writes nothing. Everything that must be
+        decided and recorded together (the controller's fence) happens inside one of these."""
         with open(self.path.with_name(self.path.name + ".lock"), "a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             data = self._read()
-            change(data)
+            yield data
             fd, tmp = tempfile.mkstemp(dir=self.path.parent)
             try:
                 with os.fdopen(fd, "w") as f:
@@ -69,10 +76,15 @@ class Registry:
                     os.unlink(tmp)
                 raise
 
+    def _update(self, change) -> None:
+        with self.transaction() as data:
+            change(data)
+
     # -- controller side ---------------------------------------------------
 
     def register(self, ip: str, caller: Caller, sandbox: str) -> None:
         def change(data):
+            data["callers"] = {k: c for k, c in data["callers"].items() if c["sandbox"] != sandbox}   # drops its pending claim
             data["callers"][ip] = {**asdict(caller), "sandbox": sandbox}
             data["epochs"][caller.key] = max(data["epochs"].get(caller.key, 0), caller.epoch)
         self._update(change)

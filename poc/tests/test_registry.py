@@ -36,3 +36,13 @@ def test_a_failed_write_leaves_no_temp_file_and_keeps_the_old_registry(tmp_path,
     monkeypatch.undo()
     assert sorted(p.name for p in tmp_path.iterdir()) == ["registry.json", "registry.json.lock"]
     assert reg.lookup("10.0.0.1") and reg.lookup("10.0.0.2") is None
+
+
+def test_a_wrongly_shaped_registry_is_an_error_not_a_crash(tmp_path):
+    import pytest
+    from agent_network_proxy.registry import RegistryError
+    reg = Registry(tmp_path / "registry.json")
+    for bad in ("{}", "[]", '{"callers": [], "epochs": {}}'):
+        reg.path.write_text(bad)
+        with pytest.raises(RegistryError):
+            reg.newest_epoch("t/s")

@@ -14,8 +14,10 @@ SECRET = json.loads((STATE.parent / "config" / "secrets.json").read_text())["ten
 
 def _stub_ip():
     fmt = '{{(index .NetworkSettings.Networks "agentpoc_upstream").IPAddress}}'
-    return subprocess.run(["docker", "inspect", "-f", fmt, "agentpoc-stub-1"],
-                          capture_output=True, text=True, check=True).stdout.strip()
+    name = subprocess.run(["docker", "ps", "--filter", "label=com.docker.compose.service=stub", "--filter",
+                           "label=com.docker.compose.project=agentpoc", "--format", "{{.Names}}"],
+                          capture_output=True, text=True, check=True).stdout.split()[0]
+    return subprocess.run(["docker", "inspect", "-f", fmt, name], capture_output=True, text=True, check=True).stdout.strip()
 
 
 def test_direct_request_to_the_stub_fails(proxied):
@@ -340,7 +342,6 @@ def test_the_proxy_container_is_found_by_its_compose_labels(proxied):
 
 
 def test_malformed_grants_are_a_sandbox_error_not_a_crash(tmp_path):
-    import dataclasses
     import pytest
     from agent_network_proxy.registry import Registry
     from sandbox_controller import ProxyConfig, SandboxController, SandboxError
@@ -396,7 +397,7 @@ def test_stop_survives_a_broken_docker_client(proxied):
 
 def test_an_unreachable_daemon_is_not_mistaken_for_a_stopped_sandbox(proxied, tmp_path):
     import pytest
-    from sandbox_controller import SandboxController, SandboxError
+    from sandbox_controller import SandboxError
     ctl, sbx = proxied()
     broken = tmp_path / "docker"                            # a docker CLI that cannot reach its daemon
     broken.write_text("#!/bin/sh\necho 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock' >&2\nexit 1\n")
@@ -446,3 +447,96 @@ def test_a_missing_image_fails_fast_instead_of_pulling(tmp_path):
     with pytest.raises(SandboxError, match="No such image") as err:
         SandboxController(image="agent-sandbox:does-not-exist").create(tmp_path / "w")
     assert "pull access" not in str(err.value)
+
+
+def test_two_controllers_racing_for_one_session_cannot_both_win(proxied, tmp_path):
+    import threading
+    from sandbox_controller import SandboxController, SandboxError
+    ctl, _ = proxied()
+    caller = Caller("race-" + tmp_path.name[-8:], "agent-a", "tenant-a", 2)
+    gate, outcomes = threading.Barrier(2), []
+    def contend(i):
+        c = SandboxController(proxy=ctl.proxy)        # two controllers that know nothing of each other
+        gate.wait()
+        try:
+            outcomes.append(c.create(tmp_path / f"race{i}", caller))
+        except SandboxError as exc:
+            outcomes.append(exc)
+    threads = [threading.Thread(target=contend, args=(i,)) for i in range(2)]
+    [t.start() for t in threads]; [t.join() for t in threads]
+    winners = [o for o in outcomes if not isinstance(o, Exception)]
+    try:
+        assert len(winners) == 1, outcomes
+        assert len(proxied.registry.sandboxes(caller.key)) == 1
+    finally:
+        for w in winners:
+            ctl.stop(w)
+
+
+def test_a_create_that_fails_and_cannot_clean_up_says_what_it_left_behind(proxied, tmp_path, monkeypatch):
+    import pytest
+    from sandbox_controller import SandboxError
+    ctl, _ = proxied()
+    def no_register(*a, **kw):
+        raise OSError("registry unwritable")
+    monkeypatch.setattr(ctl.proxy.registry, "register", no_register)
+    monkeypatch.setattr(ctl, "_remove_network", lambda n: (_ for _ in ()).throw(OSError("daemon busy")))
+    with pytest.raises(SandboxError, match=r"sbx-\w+.*reap") as err:
+        ctl.create(tmp_path / "orphan", Caller("s-orphan-" + tmp_path.name[-6:], "agent-a", "tenant-a", 1))
+    assert "registry unwritable" in str(err.value) and "daemon busy" in str(err.value)
+    monkeypatch.undo()
+    ctl.reap()                                           # and reap() really does clean it up
+
+
+def test_the_same_epoch_can_be_retried_after_its_sandbox_expired(tmp_path):
+    from sandbox_controller import Limits, SandboxController
+    ctl = SandboxController()                            # no proxy: only the in-memory map knows the old sandbox
+    caller = Caller("expire-" + tmp_path.name[-6:], "agent-no-net", "tenant-a", 1)
+    ctl.create(tmp_path / "w", caller, Limits(deadline_s=1))
+    time.sleep(3)                                        # it exited at its deadline, but nobody called stop()
+    second = ctl.create(tmp_path / "w", caller)
+    ctl.stop(second)
+
+
+def test_a_workdir_belongs_to_one_session_and_its_marker_is_not_followed(make_sandbox, tmp_path):
+    import pytest
+    from sandbox_controller import SandboxError
+    ctl, mine = make_sandbox("shared", caller=Caller("s-a", "agent-no-net", "tenant-a", 1))
+    ctl.stop(mine)
+    with pytest.raises(SandboxError, match="belongs to"):                          # another tenant, same directory
+        ctl.create(mine.workdir, Caller("s-a", "agent-b", "tenant-b", 1))
+    victim = tmp_path / "host-file"
+    victim.write_text("x")
+    marker = mine.workdir / ".agent-sandbox-workdir"
+    marker.unlink()
+    marker.symlink_to(victim)                                                      # what a sandbox could do to its own work dir
+    before = victim.stat().st_mtime_ns
+    with pytest.raises(SandboxError, match="not dedicated"):
+        ctl.create(mine.workdir, Caller("s-a", "agent-no-net", "tenant-a", 1))
+    assert victim.stat().st_mtime_ns == before                                     # the host file was never touched
+
+
+def test_basic_auth_placeholders_are_swapped_too(proxied):
+    import base64
+    ctl, sbx = proxied()
+    before = len(lines(STUB_LOG))
+    basic = base64.b64encode(b"x-access-token:placeholder-github-token").decode()
+    py(ctl, sbx, "import urllib.request as u\n"
+                 f"u.urlopen(u.Request('{GITHUB}', headers={{'Authorization': 'Basic {basic}'}}), timeout=8).read()")
+    got = lines(STUB_LOG)[before]["headers"]["Authorization"]
+    assert base64.b64decode(got.split()[1]).decode() == f"x-access-token:{SECRET}"
+
+
+def test_a_placeholder_where_it_cannot_be_swapped_is_refused_not_forwarded(proxied):
+    ctl, sbx = proxied()
+    before = len(lines(STUB_LOG))
+    in_path = py(ctl, sbx, "import urllib.request as u\n"
+                           "try: print(u.urlopen('https://api.github.test/bot-placeholder-github-token/send', timeout=8).status)\n"
+                           "except Exception as e: print(repr(e))").stdout
+    in_body = py(ctl, sbx, "import urllib.request as u\n"
+                           "r = u.Request('https://api.github.test/user', data=b'{\"token\": \"placeholder-github-token\"}', method='POST')\n"
+                           "try: print(u.urlopen(r, timeout=8).status)\n"
+                           "except Exception as e: print(repr(e))").stdout
+    assert "HTTPError 403" in in_path and "HTTPError 403" in in_body
+    assert len(lines(STUB_LOG)) == before
+    assert lines(AUDIT_LOG)[-1]["reason"] == "placeholder in an unsupported position"

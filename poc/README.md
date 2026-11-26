@@ -9,7 +9,7 @@ containers. Design context: [../docs/service-architecture.md](../docs/service-ar
 ```bash
 pip install pytest      # the only host dependency besides Docker and Python 3.10+
 make demo               # scripted agent: pandoc, a credentialed call, a denied call, an escape attempt
-make test               # 86 tests, ~110 s
+make test               # 93 tests, ~2 min
 make bench              # cold start, 50 runs per configuration
 make down               # stop the proxy and stub
 ```
@@ -75,7 +75,10 @@ Not present at all: session-manager, ingress, auth, llm-gateway, object store, r
 | Agent/tenant mismatch refused (controller and proxy) | `test_controller_refuses_an_agent_tenant_mismatch`, `test_proxy_rejects_an_agent_tenant_mismatch` |
 | Scrubbing leaves repeated headers and HEAD responses intact | `test_response_scrubbing_keeps_headers_intact` |
 | The leak detector itself works (no vacuous "not found") | `test_the_leak_detector_detects_a_planted_leak` |
-| Registry: no lost updates, no stale reads | `tests/test_registry.py` |
+| Registry: no lost updates, no stale reads, a wrongly shaped file is an error | `tests/test_registry.py` |
+| Two controllers cannot both win one session; a failed create says what it left behind | `test_two_controllers_racing_for_one_session_cannot_both_win`, `test_a_create_that_fails_and_cannot_clean_up_says_what_it_left_behind` |
+| A work dir belongs to one session; its marker is not followed | `test_a_workdir_belongs_to_one_session_and_its_marker_is_not_followed` |
+| Basic-auth placeholders are swapped; unswappable ones are refused | `test_basic_auth_placeholders_are_swapped_too`, `test_a_placeholder_where_it_cannot_be_swapped_is_refused_not_forwarded` |
 | Ungranted destination denied (and audited) | `test_destination_not_in_grants_is_denied` |
 | Identity from address, not claims | `test_caller_is_identified_by_address_not_by_claims` |
 | Real token in the stub, nowhere in the sandbox | `test_stub_receives_the_real_token_but_the_sandbox_never_sees_it`, `test_real_token_is_nowhere_in_the_sandbox`, `test_proxy_private_key_is_not_in_the_sandbox` |
@@ -102,7 +105,7 @@ difference to start time. These are local-image numbers: no pull, no Kubernetes,
 **Credentials and the proxy**
 - **API-tool calls from the executor** (explicit session id + epoch, the proxy's other identification path) are not built. Only calls from a sandbox, identified by address, exist.
 - Only the proxy-configured mechanism works. Transparent interception for hardcoded endpoints is not built; such a tool has no route at all. Client-certificate (mTLS) tools were not tested; only certificate pinning was. gRPC and raw TCP are not handled (PROXY-1).
-- Placeholder swap covers header values and query values **as written**: not bodies, and not `Authorization: Basic base64(user:placeholder)`, which is how git over HTTPS sends a token (it would reach the destination carrying the placeholder and fail with 401). A token that goes in the URL *path* (`/bot<token>/...`) is not swapped either. Decoding Basic credentials and rewriting the path are the fixes; neither is done. Response scrubbing is exact-match only: an encoded or transformed echo of a secret gets through (AUDIT-1).
+- Placeholder swap covers header values (including inside HTTP Basic credentials, which is how git sends a token) and query values. A placeholder in the URL path or in a request body cannot be swapped, so such a request is **refused** (`placeholder in an unsupported position`) instead of going out with a fake token. Cookies and other encodings are not handled. Response scrubbing is exact-match only: an encoded or transformed echo of a secret gets through (AUDIT-1).
 - The proxy trusts only the stub's self-signed cert upstream, has one CA for all tenants, and keeps its key on disk (D21, D22).
 - Rate limit is in the memory of one proxy (N replicas would allow N times the limit) and counts requests, not `CONNECT`s, so a sandbox can open tunnels to a granted host without being limited.
 - The state directories are meant for a single-user machine such as a laptop. The registry directory is not world-writable (it is the proxy's trust root), but the audit, stub and proxy-conf directories are, because the containers write them as uid 65534. On a shared host another user could then rewrite the audit log or replace the proxy CA certificate that is mounted into every sandbox; they should be owned by that uid instead.
@@ -114,8 +117,9 @@ difference to start time. These are local-image numbers: no pull, no Kubernetes,
 - No size limit on the work dir, which must be dedicated to its sandbox (the controller makes it world-writable); no object-store restore/flush.
 - Replay edge case: the executor re-runs a command in a fresh sandbox only when `docker exec` could not start it, which it recognises from the daemon's error text plus an inspect (D30). A command that itself prints that exact text, exits non-zero, and runs in a sandbox that dies at the same instant would be replayed once. No privilege is gained (the agent could simply call the tool twice), but it is not strictly "exactly once".
 - Durability: the session log is written but there is no resume, no heartbeat, no reconciler. The controller's session map is in memory.
-- One controller instance is the supported shape (D16). A second or restarted one is fenced through the registry (stale epochs refused, older sandboxes stopped, an equal epoch refused while another sandbox lives, D43), but that is exercised only by tests that build a second controller in-process. The fence is check-then-act and not atomic, so two controllers racing on the same session and epoch could both succeed.
+- One controller instance is the supported shape (D16). Fencing is atomic across controllers on one host: the epoch check, the bump and a claim on the session happen inside one registry transaction (a file lock), and the race test runs two controllers against one session. A claim made before its sandbox exists expires after 60 s if the claimant crashes. The lock is a single-host `flock`, so this does not extend to controllers on different machines.
 - Single process, no concurrency control. Nothing here shows the 1000-agent / 10k-calls-per-minute target.
+- The proxy is attached to each sandbox network by hand. Recreating the proxy container (`make demo` or `python3 stack.py up` after a config change) while sandboxes are running detaches them from it, and they then fail with network errors until they are recreated. Do not restart the stack under live sandboxes.
 - No usage metering, cost rollup or tracing.
 - Resource limits are assumptions (D6), not tuned values.
 
