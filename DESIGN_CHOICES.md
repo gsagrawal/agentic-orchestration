@@ -70,7 +70,7 @@ swappable state plumbing) are implemented as specified and are not repeated here
 | # | Choice | Rejected alternative | Why |
 |---|--------|----------------------|-----|
 | 41 | Liveness is derived: an executor is alive if its last heartbeat is at most one lease old, judged by the manager at reconcile time. Nothing stores "dead". | A status column the manager flips. | No second piece of state that can disagree with the heartbeat; a zombie that heartbeats again is simply alive again. |
-| 42 | The heartbeat is sent from the executor's loop, between iterations. | A background heartbeat thread. | A thread would keep reporting "alive" while the loop is hung. Cost: one long iteration (a slow tool call) must stay under the lease, or the executor is fenced while healthy. Fencing makes that safe, not free. |
+| 42 | The heartbeat is sent from the executor's loop, between iterations. | A background heartbeat thread. | A thread would keep reporting "alive" while the loop is hung. The heartbeat is also sent between sessions, so the longest silence is one iteration, not one sweep over all its sessions (a bug the demo exposed: with 4 sessions per executor, healthy executors were declared dead). Cost: one iteration (a slow tool call) must stay under the lease, or the executor is fenced while healthy. Fencing makes that safe, not free. |
 | 43 | Heartbeats are throttled to one per interval (0.5 s, an assumption). | Write on every tick. | An idle executor ticks up to 50 times a second (1 / its 0.02 s poll interval, arithmetic not a measurement); each heartbeat is a write on the one SQLite write lock. |
 | 44 | "Needs an executor" is one SQL predicate (`created`, or `running` on a non-live executor), used to list candidates and again to guard the UPDATE (`assign_if_needed`). | List, then assign unconditionally. | A live executor can finish or pause the session between the two steps; an unconditional assign would restart it. Unit-tested. |
 | 45 | With no live executor, sessions stay where they are and the epoch is not bumped. | Bump anyway. | Nothing to fence yet; burning epochs would only fence a holder that might come back. |
@@ -100,6 +100,19 @@ swappable state plumbing) are implemented as specified and are not repeated here
 | 59 | `step_count` is updated in the same statement as the log entry that makes the call (`counts_as_step`). | A separate update, or derive it only from the log. | The count the manager reads cannot disagree with the log, and it costs no extra write. |
 | 60 | A `stop_reason` column (`step_cap` or `run_limit`) is set by both stop paths. | Reason only in the log. | The manager cannot write the log, so the run-limit stop would leave no reason; status must say why. |
 | 61 | The waiting deadline is set by the executor when it releases the session (`release(..., wait_deadline)`). | The manager sets it later. | The executor is the one that knows the session started waiting, at one atomic transition. |
+
+## Step 8: chaos, invariants, harness, measurements
+
+| # | Choice | Rejected alternative | Why |
+|---|--------|----------------------|-----|
+| 62 | Chaos uses two disturbances: SIGKILL (executor gone) and SIGSTOP for longer than the lease then SIGCONT (a real zombie that wakes up). | Kills only. | A killed process cannot write, so kills never exercise fencing. Only a frozen-then-resumed process does. |
+| 63 | The effects ledger also records the session's epoch at commit time (`session_epoch`), and an invariant requires it to equal the caller's. | Check only that epochs never go backwards. | Without it, a zombie's effect that landed after the epoch bump looked legitimate afterwards. With it, removing the tool service's in-transaction check fails chaos in 3 of 6 runs (it was 0 of 4 before). |
+| 64 | A non-idempotent call also spends its delay between the effect and the stored result. | Delay before the effect only. | Real calls take time to answer. Otherwise a random kill almost never lands in the window that matters (always-retry went undetected by chaos before this). |
+| 65 | The heartbeat is also sent between the sessions of one executor, not only once per sweep. | Once per tick. | Found by the demo: with several sessions per executor, a sweep outlasted the lease and healthy executors were declared dead (epochs 4 to 5 on sessions nobody killed). Tested with a fake clock. |
+| 66 | Chaos expects each agent to end in its own state (`quick` done, `ask-human` expired, `poison` stopped) and demands a minimum number of kills and at least one freeze. | Only "all sessions ended". | A weaker check passes when nothing happened. |
+| 67 | The invariant checker has its own tests that inject each violation. | Trust it. | A checker that cannot fail makes a green chaos run meaningless. |
+| 68 | `Cluster` runs the reconcile loop in a thread with its own manager object. | A third process. | Simple; the SQLite connection belongs to one thread, so the thread builds its own. |
+| 69 | Benchmarks report every run and the machine and settings; a zero-delay series sits beside the delayed one. | One headline number. | The delayed series scales only because executors sleep; the zero-delay series shows that the ceiling is elsewhere. |
 
 ## Open items (not yet decided or built)
 

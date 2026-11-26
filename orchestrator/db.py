@@ -80,7 +80,8 @@ CREATE TABLE IF NOT EXISTS effects (
     session_id TEXT    NOT NULL,
     step       INTEGER NOT NULL,
     tool       TEXT    NOT NULL,
-    epoch      INTEGER NOT NULL
+    epoch      INTEGER NOT NULL,  -- epoch the caller presented
+    session_epoch INTEGER NOT NULL -- the session's epoch when this committed; must equal `epoch`
 );
 CREATE TRIGGER IF NOT EXISTS effects_no_update BEFORE UPDATE ON effects
 BEGIN SELECT RAISE(ABORT, 'effects is append-only'); END;
