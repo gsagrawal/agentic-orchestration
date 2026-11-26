@@ -77,12 +77,22 @@ swappable state plumbing) are implemented as specified and are not repeated here
 | 46 | Manager and executors compare timestamps from the same `time.time()`. | A logical clock or database-side time. | Fine on one machine; clock skew is a README gap. |
 | 47 | `register_executor` became `heartbeat`: the first call registers. | Separate register and heartbeat. | They are the same upsert. |
 
+## Step 6: a tool call in flight when the executor dies
+
+| # | Choice | Rejected alternative | Why |
+|---|--------|----------------------|-----|
+| 48 | Recovery asks the tool service for the stored result first, then retries only idempotent tools; a non-idempotent tool with no result is logged as `tool_unknown`. | Retry everything (the key dedupes); or fail the session. | Decision 3. Retrying a non-idempotent call whose effect already happened would repeat it (the tests show a double effect when this rule is removed). Failing the session throws away work the model could continue from. |
+| 49 | "Outcome unknown" is its own log entry (`tool_unknown`), rendered into the model's messages by `Replay`. | Write a fake `tool_result` saying "unknown". | The log stays honest about what is known, and a later reader or audit can tell the two apart. |
+| 50 | The unknown outcome is conservative: the model is also told "unknown" when the tool never ran (killed before the effect). | Distinguish by reading the effects ledger. | The executor cannot see the ledger in reality, and the model must be safe either way. The tests show both cases (0 and 1 effects). |
+| 51 | Fault injection is a hook (`fault_hook(point)`) called at five named points; `kill_self_at` makes a worker SIGKILL itself there. | Sleeps and outside kills only. | Deterministic placement of a real `kill -9` at exactly the window under test. One extra test kills from outside, mid-delay, for realism. |
+| 52 | Two test layers: simulated death (exception at the same points; fast, checks the rules and the model input) and a real-process table (9 kill points). | Only one of them. | The first isolates logic; the second proves the whole path with a real SIGKILL, reassignment and replay. |
+| 53 | A zombie that finishes a non-idempotent call after the new executor recorded "unknown" leaves the model with "unknown" although the tool service has the result. | Reconcile later. | Safe (the zombie's own append is fenced); at worst the model is told less than is known. |
+
 ## Open items (not yet decided or built)
 
 | Item | Why it matters | Planned in |
 |------|----------------|-----------|
-| Resume with a tool call in flight raises `NotImplementedError` | Fails closed until the recovery rules exist | Step 6 |
 | A terminal transition must bump the epoch | `append()` checks only the epoch, so the last holder could still write to a session that just ended | Step 7 |
 | A resumed `waiting` session would be released again at once | `advance()` needs a human-response log entry to read first | Step 7 |
-| An unexpected exception kills the whole worker and every session on it | Swallowing it would make a broken session spin silently | Steps 5 and 7 |
+| An unexpected exception kills the whole worker and every session on it | Swallowing it would make a broken session spin silently | Step 7 |
 | One manager process only | Two managers could assign the same session; needs leader election | Not planned (README gap) |
