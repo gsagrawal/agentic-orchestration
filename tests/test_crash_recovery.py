@@ -16,10 +16,12 @@ import pytest
 
 from orchestrator import session_log, state_table
 from orchestrator.agent_store import AgentStore
-from orchestrator.executor import OUTCOME_UNKNOWN, Executor, start_worker
+from orchestrator.errors import StaleEpoch
+from orchestrator.executor import OUTCOME_UNKNOWN, Executor, SessionRun, start_worker
 from orchestrator.scripted_model import ScriptedModel
 from orchestrator.session_manager import ManagerConfig, SessionManager
 from orchestrator.tool_service import effect_counts
+from tests.helpers import wait_until
 
 
 class Died(Exception):
@@ -79,6 +81,27 @@ def test_non_idempotent_call_that_ran_without_a_stored_result_is_not_run_a_secon
     assert effect_counts(conn) == {(sid, 1): 1}  # one email, and the model was not told it was sent
 
 
+def test_a_zombie_cannot_recover_a_call_either(conn, db_path, agents_path):
+    """ex-2 has picked the session up mid-call but is replaced by ex-3 before it acts.
+    Its recovery (lookup, retry) is rejected: no effect, no log entry."""
+    sid = "s1"
+    state_table.create_session(conn, sid, "t", step_cap=10, agent_id="set-value", agent_version=1)
+    state_table.assign(conn, sid, "ex-1")
+    with pytest.raises(Died):
+        Executor(db_path, agents_path, "ex-1", fault_hook=die_at("before_effect")).tick()
+
+    epoch = state_table.assign(conn, sid, "ex-2")
+    ex2 = Executor(db_path, agents_path, "ex-2")
+    run = SessionRun(ex2.conn, ex2.tools, ex2.model, ex2.agents, sid, epoch, ex2.fault_hook)  # replayed, not yet advanced
+    state_table.assign(conn, sid, "ex-3")
+
+    log_before = session_log.read(conn, sid)
+    with pytest.raises(StaleEpoch):
+        run.advance()
+    assert session_log.read(conn, sid) == log_before
+    assert effect_counts(conn) == {}
+
+
 def test_the_model_is_shown_outcome_unknown(conn, db_path, agents_path):
     seen = []
 
@@ -95,15 +118,6 @@ def test_the_model_is_shown_outcome_unknown(conn, db_path, agents_path):
 
 LEASE = 0.6       # short so a scenario takes about a second; ASSUMPTION for these tests only
 HEARTBEAT = 0.1
-
-
-def wait_until(condition, what, timeout=20.0):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if condition():
-            return
-        time.sleep(0.05)
-    raise AssertionError(f"timed out waiting for {what}")
 
 
 def run_until_done(manager, sid):

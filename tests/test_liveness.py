@@ -9,6 +9,7 @@ from orchestrator.agent_store import AgentStore
 from orchestrator.executor import Executor, start_worker
 from orchestrator.session_manager import ManagerConfig, SessionManager
 from orchestrator.tool_service import effect_counts
+from tests.helpers import wait_until
 
 LEASE = 3.0
 
@@ -169,12 +170,3 @@ def test_killing_a_real_executor_process_makes_the_manager_see_it_as_dead(conn, 
     finally:
         proc.kill()
         proc.join()
-
-
-def wait_until(condition, what, timeout=15.0):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if condition():
-            return
-        time.sleep(0.05)
-    raise AssertionError(f"timed out waiting for {what}")
