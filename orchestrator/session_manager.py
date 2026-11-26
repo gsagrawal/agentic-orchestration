@@ -16,7 +16,7 @@ from typing import Callable, Protocol, runtime_checkable
 from . import state_table
 from .agent_store import AgentStore
 from .db import connect, write_txn
-from .errors import BudgetExceeded, QuotaExceeded, SessionClosed
+from .errors import BudgetExceeded, QuotaExceeded
 
 
 @runtime_checkable
@@ -32,6 +32,9 @@ class ManagerConfig:
     tenant_overrides: dict[str, int] = field(default_factory=dict)  # tenant -> its own limit
     step_cap: int = 50
     run_limit_seconds: float = 300.0
+    # An executor is dead if its last heartbeat is older than this. Must exceed the executor's
+    # heartbeat interval plus its longest single loop iteration (a long tool call).
+    lease_seconds: float = 3.0
 
     def quota_for(self, tenant: str) -> int:
         return self.tenant_overrides.get(tenant, self.max_live_per_tenant)
@@ -69,16 +72,17 @@ class SessionManager:
     # --- reconciler ------------------------------------------------------------------
 
     def reconcile_once(self) -> None:
-        """Compare what should be true with what is, and fix it. Today: every admitted
-        session must have an executor. Only one manager may run this (no leader election)."""
-        for session_id in state_table.unassigned_sessions(self.conn):
-            executor_id = state_table.least_loaded_executor(self.conn)
+        """Make reality match the desired state: every live session runs on a live executor.
+
+        That covers first assignment and recovery from a dead executor alike; the manager
+        does not need to know why an executor is gone. Assumes one manager process.
+        """
+        alive_since = self.clock() - self.config.lease_seconds
+        for session_id in state_table.sessions_needing_executor(self.conn, alive_since):
+            executor_id = state_table.least_loaded_executor(self.conn, alive_since)
             if executor_id is None:
-                return  # no executors yet; the sessions stay 'created' and are retried next time
-            try:
-                state_table.assign(self.conn, session_id, executor_id)
-            except SessionClosed:
-                continue  # it ended between listing and assigning; nothing to do
+                return  # no live executor; the sessions are retried on the next pass
+            state_table.assign_if_needed(self.conn, session_id, executor_id, alive_since)
 
     def run_forever(self, interval: float = 0.05) -> None:
         while True:

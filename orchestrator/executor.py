@@ -92,17 +92,26 @@ class SessionRun:
 
 
 class Executor:
-    def __init__(self, db_path: str, agents_path: str, executor_id: str, tool_delay: float = 0.0, model=None):
+    def __init__(self, db_path: str, agents_path: str, executor_id: str, tool_delay: float = 0.0, model=None,
+                 clock=time.time, heartbeat_interval: float = 0.5):
         self.executor_id = executor_id
         self.conn = connect(db_path)
-        state_table.register_executor(self.conn, executor_id, time.time())
+        self.clock = clock
+        self.heartbeat_interval = heartbeat_interval  # ASSUMPTION: well under the manager's lease
+        self._last_heartbeat = self.clock()
+        state_table.heartbeat(self.conn, executor_id, self._last_heartbeat)  # registers us
         self.tools = ToolService(db_path, default_tools(tool_delay))
         self.agents = AgentStore(agents_path)
         self.model = model or ScriptedModel()
         self.runs: dict[str, SessionRun] = {}
 
     def tick(self) -> int:
-        """Give every assigned session one iteration. Returns how many sessions were assigned."""
+        """Give every assigned session one iteration. Returns how many sessions were assigned.
+
+        The heartbeat is sent from here, between iterations, on purpose: it says "the loop
+        is alive", not "the process exists". A single long iteration delays it.
+        """
+        self._heartbeat_if_due()
         assigned = dict(state_table.assigned_to(self.conn, self.executor_id))
         # Forget sessions that moved away, or that came back at a newer epoch (replay again).
         for sid in [s for s, run in self.runs.items() if assigned.get(s) != run.epoch]:
@@ -116,6 +125,12 @@ class Executor:
             except StaleEpoch:
                 self.runs.pop(sid, None)  # we were fenced mid-iteration; the session is not ours
         return len(assigned)
+
+    def _heartbeat_if_due(self) -> None:
+        now = self.clock()
+        if now - self._last_heartbeat >= self.heartbeat_interval:
+            state_table.heartbeat(self.conn, self.executor_id, now)
+            self._last_heartbeat = now
 
     def run_forever(self, poll_interval: float = 0.02) -> None:
         while True:

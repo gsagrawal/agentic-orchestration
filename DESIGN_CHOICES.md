@@ -65,11 +65,22 @@ swappable state plumbing) are implemented as specified and are not repeated here
 | 39 | The pinned version is the agent's highest version at admission. | Caller chooses the version. | Matches the architecture ("pins the Session to the Agent's current version"). |
 | 40 | `reconcile_once()` is the single place that assigns; step 5 extends it to dead executors. Assumes one manager process (no leader election). | Assign inside `start_session`. | One code path for first assignment and for recovery, so it is tested once. |
 
+## Step 5: liveness and reconciler
+
+| # | Choice | Rejected alternative | Why |
+|---|--------|----------------------|-----|
+| 41 | Liveness is derived: an executor is alive if its last heartbeat is at most one lease old, judged by the manager at reconcile time. Nothing stores "dead". | A status column the manager flips. | No second piece of state that can disagree with the heartbeat; a zombie that heartbeats again is simply alive again. |
+| 42 | The heartbeat is sent from the executor's loop, between iterations. | A background heartbeat thread. | A thread would keep reporting "alive" while the loop is hung. Cost: one long iteration (a slow tool call) must stay under the lease, or the executor is fenced while healthy. Fencing makes that safe, not free. |
+| 43 | Heartbeats are throttled to one per interval (0.5 s, an assumption). | Write on every tick. | An idle executor ticks up to 50 times a second (1 / its 0.02 s poll interval, arithmetic not a measurement); each heartbeat is a write on the one SQLite write lock. |
+| 44 | "Needs an executor" is one SQL predicate (`created`, or `running` on a non-live executor), used to list candidates and again to guard the UPDATE (`assign_if_needed`). | List, then assign unconditionally. | A live executor can finish or pause the session between the two steps; an unconditional assign would restart it. Unit-tested. |
+| 45 | With no live executor, sessions stay where they are and the epoch is not bumped. | Bump anyway. | Nothing to fence yet; burning epochs would only fence a holder that might come back. |
+| 46 | Manager and executors compare timestamps from the same `time.time()`. | A logical clock or database-side time. | Fine on one machine; clock skew is a README gap. |
+| 47 | `register_executor` became `heartbeat`: the first call registers. | Separate register and heartbeat. | They are the same upsert. |
+
 ## Open items (not yet decided or built)
 
 | Item | Why it matters | Planned in |
 |------|----------------|-----------|
-| `least_loaded_executor()` ignores heartbeats | A dead executor would be handed sessions | Step 5 |
 | Resume with a tool call in flight raises `NotImplementedError` | Fails closed until the recovery rules exist | Step 6 |
 | A terminal transition must bump the epoch | `append()` checks only the epoch, so the last holder could still write to a session that just ended | Step 7 |
 | A resumed `waiting` session would be released again at once | `advance()` needs a human-response log entry to read first | Step 7 |

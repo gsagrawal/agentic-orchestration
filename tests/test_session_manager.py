@@ -12,7 +12,10 @@ from orchestrator.executor import Executor
 from orchestrator.session_manager import ManagerConfig, SessionEngine, SessionManager
 
 
-def make_manager(db_path, agents_path, now=1000.0, **config):
+NOW = 1000.0  # the fake clock every test manager reads
+
+
+def make_manager(db_path, agents_path, now=NOW, **config):
     return SessionManager(db_path, AgentStore(agents_path), ManagerConfig(**config), clock=lambda: now)
 
 
@@ -94,7 +97,7 @@ def test_over_budget_tenant_is_refused(conn, db_path, agents_path):
 
 def test_assignment_bumps_epoch_and_spreads_sessions_over_executors(conn, db_path, agents_path):
     for ex in ("ex-1", "ex-2"):
-        state_table.register_executor(conn, ex, 0)
+        state_table.heartbeat(conn, ex, NOW)
     mgr = make_manager(db_path, agents_path)
     ids = [mgr.start_session("t", "two-tools") for _ in range(4)]
     mgr.reconcile_once()
@@ -109,13 +112,13 @@ def test_sessions_wait_in_created_until_an_executor_exists(conn, db_path, agents
     sid = mgr.start_session("t", "two-tools")
     mgr.reconcile_once()
     assert mgr.get_status(sid)["state"] == "created"
-    state_table.register_executor(conn, "ex-1", 0)
+    state_table.heartbeat(conn, "ex-1", NOW)
     mgr.reconcile_once()
     assert mgr.get_status(sid)["state"] == "running"
 
 
 def test_reconcile_is_idempotent(conn, db_path, agents_path):
-    state_table.register_executor(conn, "ex-1", 0)
+    state_table.heartbeat(conn, "ex-1", NOW)
     mgr = make_manager(db_path, agents_path)
     sid = mgr.start_session("t", "two-tools")
     mgr.reconcile_once()
@@ -124,7 +127,7 @@ def test_reconcile_is_idempotent(conn, db_path, agents_path):
 
 
 def test_admit_assign_and_run_end_to_end(conn, db_path, agents_path):
-    ex = Executor(db_path, agents_path, "ex-1")  # registers itself
+    ex = Executor(db_path, agents_path, "ex-1", clock=lambda: NOW)  # registers itself
     mgr = make_manager(db_path, agents_path)
     sid = mgr.start_session("t", "two-tools")
     mgr.reconcile_once()
@@ -138,12 +141,12 @@ def test_session_manager_satisfies_the_engine_interface(db_path, agents_path):
 
 
 def test_reconcile_skips_a_session_that_ended_between_listing_and_assigning(conn, db_path, agents_path, monkeypatch):
-    state_table.register_executor(conn, "ex-1", 0)
+    state_table.heartbeat(conn, "ex-1", NOW)
     mgr = make_manager(db_path, agents_path)
     ended = mgr.start_session("t", "two-tools")
     live = mgr.start_session("t", "two-tools")
     conn.execute("UPDATE sessions SET state = 'cancelled' WHERE id = ?", (ended,))
-    monkeypatch.setattr(state_table, "unassigned_sessions", lambda c: [ended, live])  # the stale listing
+    monkeypatch.setattr(state_table, "sessions_needing_executor", lambda c, alive_since: [ended, live])  # the stale listing
     mgr.reconcile_once()
     assert mgr.get_status(ended)["state"] == "cancelled"
     assert mgr.get_status(live)["state"] == "running"
