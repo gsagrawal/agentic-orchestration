@@ -40,7 +40,9 @@ class AgentExecutor:
         self.step_cap, self.timeout_s, self.deadline_s, self.limits = step_cap, timeout_s, deadline_s, limits
 
     def run(self, caller: Caller, script: list[ToolCall], workdir: Path) -> list[dict]:
-        agent = json.loads(self.grants_path.read_text())["agents"][caller.agent]
+        agent = json.loads(self.grants_path.read_text())["agents"].get(caller.agent)
+        if agent is None:
+            raise ValueError(f"unknown agent {caller.agent}")
         if agent["tenant"] != caller.tenant:
             raise ValueError(f"agent {caller.agent} belongs to {agent['tenant']}, not {caller.tenant}")
         if unknown := set(agent["tools"]) - set(INTERPRETERS):

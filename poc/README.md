@@ -9,7 +9,7 @@ containers. Design context: [../docs/service-architecture.md](../docs/service-ar
 ```bash
 pip install pytest      # the only host dependency besides Docker and Python 3.10+
 make demo               # scripted agent: pandoc, a credentialed call, a denied call, an escape attempt
-make test               # 56 tests, ~80 s
+make test               # 63 tests, ~85 s
 make bench              # cold start, 50 runs per configuration
 make down               # stop the proxy and stub
 ```
@@ -101,7 +101,7 @@ difference to start time. These are local-image numbers: no pull, no Kubernetes,
 **Credentials and the proxy**
 - **API-tool calls from the executor** (explicit session id + epoch, the proxy's other identification path) are not built. Only calls from a sandbox, identified by address, exist.
 - Only the proxy-configured mechanism works. Transparent interception for hardcoded endpoints is not built; such a tool has no route at all. Client-certificate (mTLS) tools were not tested; only certificate pinning was. gRPC and raw TCP are not handled (PROXY-1).
-- Placeholder swap covers headers and query string, not bodies. Response scrubbing is exact-match only: an encoded or transformed echo of a secret gets through (AUDIT-1).
+- Placeholder swap covers header values and query values **as written**: not bodies, and not `Authorization: Basic base64(user:placeholder)`, which is how git over HTTPS sends a token (it would reach the destination carrying the placeholder and fail with 401). Decoding Basic credentials before the swap is the fix; it is not done. Response scrubbing is exact-match only: an encoded or transformed echo of a secret gets through (AUDIT-1).
 - The proxy trusts only the stub's self-signed cert upstream, has one CA for all tenants, and keeps its key on disk (D21, D22).
 - Rate limit is in the memory of one proxy; N replicas would allow N times the limit.
 - The audit log is a local file with no append-only enforcement, retention or tamper evidence; the registry's epoch table is never pruned, and its lock is a single-host `flock`.
@@ -110,6 +110,7 @@ difference to start time. These are local-image numbers: no pull, no Kubernetes,
 - **Concurrent sandboxes are capped by Docker's address pools.** Each sandbox has its own network, and on this host the daemon refused the 26th one (`all predefined address pools have been fully subnetted`), measured with otherwise-default settings. A daemon with larger `default-address-pools` raises it; on Kubernetes a NetworkPolicy replaces the per-sandbox network and the limit goes away. Nothing in the PoC works around this.
 - **Kubernetes:** none. The controller drives Docker, and holds `exec` as well (D5); on Kubernetes the network rule becomes a NetworkPolicy and the executor would reach the sandbox itself.
 - No size limit on the work dir, which must be dedicated to its sandbox (the controller makes it world-writable); no object-store restore/flush.
+- Replay edge case: the executor re-runs a command in a fresh sandbox only when `docker exec` could not start it, which it recognises from the daemon's error text plus an inspect (D30). A command that itself prints that exact text, exits non-zero, and runs in a sandbox that dies at the same instant would be replayed once. No privilege is gained (the agent could simply call the tool twice), but it is not strictly "exactly once".
 - Durability: the session log is written but there is no resume, no heartbeat, no reconciler. The controller's session map is in memory.
 - Single process, no concurrency control. Nothing here shows the 1000-agent / 10k-calls-per-minute target.
 - No usage metering, cost rollup or tracing.

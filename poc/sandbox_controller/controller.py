@@ -84,8 +84,9 @@ class SandboxController:
         """`workdir` must be a directory dedicated to this sandbox: its mode is set to 0o777 so the
         unprivileged sandbox user can write to it (D7). It may already exist (a resumed session)."""
         workdir = Path(workdir).resolve()
-        if "," in str(workdir) or "\n" in str(workdir):
-            raise SandboxError("workdir path must not contain ',' or a newline: it is spliced into a --mount option")
+        self._check_mount_path(workdir, "workdir")
+        if self.proxy:
+            self._check_mount_path(self.proxy.ca_cert, "ca_cert")
         if self.proxy and caller is None:
             raise SandboxError("a proxied sandbox needs a caller identity to register")
         env = self._placeholder_env(caller) if self.proxy else {}   # validates before anything is fenced or created
@@ -136,23 +137,38 @@ class SandboxController:
         ]
 
     def stop(self, sandbox: Sandbox) -> None:
-        """Kill the sandbox, forget it, and remove its network. Safe to call twice. Every cleanup step runs
-        even if an earlier one fails; the first failure is then raised."""
+        """Kill the sandbox, forget it, and remove its network. Safe to call twice. Each step runs even if an
+        earlier one failed (a broken registry must not stop the kill); the first failure is raised at the end.
+        The network is only removed once the container is confirmed gone."""
         sandbox.alive = False
-        try:
-            if self.proxy:
-                self.proxy.registry.unregister(sandbox.name)  # first: no window where a dying sandbox is still trusted
-            subprocess.run([self.docker, "kill", sandbox.name], capture_output=True)
-            self._wait_until_gone(sandbox.name)
-        finally:
-            if sandbox.network:
-                self._remove_network(sandbox.network)
-            if sandbox.caller and self._by_session.get(sandbox.caller.session) is sandbox:
-                del self._by_session[sandbox.caller.session]
+        errors: list[Exception] = []
+
+        def attempt(step, *args) -> bool:
+            try:
+                step(*args)
+                return True
+            except Exception as exc:  # noqa: BLE001 - collected and re-raised below
+                errors.append(exc)
+                return False
+
+        if self.proxy:
+            attempt(self.proxy.registry.unregister, sandbox.name)   # first: no window where a dying sandbox is trusted
+        subprocess.run([self.docker, "kill", sandbox.name], capture_output=True)
+        gone = attempt(self._wait_until_gone, sandbox.name)
+        if sandbox.network and gone:
+            attempt(self._remove_network, sandbox.network)
+        if sandbox.caller and self._by_session.get(sandbox.caller.session) is sandbox:
+            del self._by_session[sandbox.caller.session]
+        if errors:
+            raise errors[0]
 
     def reap(self) -> None:
         """Remove every sandbox and sandbox network this controller's label owns, e.g. after a crash."""
         ids = self._docker(["ps", "-aq", "--filter", f"label={LABEL}"], "list sandboxes").split()
+        names = self._docker(["ps", "-a", "--filter", f"label={LABEL}", "--format", "{{.Names}}"], "list sandboxes").split()
+        if self.proxy:
+            for name in names:                       # stop trusting their addresses before anything else
+                self.proxy.registry.unregister(name)
         if ids:
             subprocess.run([self.docker, "kill", *ids], capture_output=True)
             for container in ids:
@@ -179,7 +195,14 @@ class SandboxController:
                                    "{{range .Containers}}{{.Name}} {{end}}"], capture_output=True, text=True).stdout.split()
         for container in attached:
             subprocess.run([self.docker, "network", "disconnect", "-f", network, container], capture_output=True)
-        subprocess.run([self.docker, "network", "rm", network], capture_output=True)
+        done = subprocess.run([self.docker, "network", "rm", network], capture_output=True, text=True)
+        if done.returncode != 0 and "No such network" not in done.stderr and "not found" not in done.stderr:
+            raise SandboxError(f"could not remove network {network}: {done.stderr.strip()}")
+
+    @staticmethod
+    def _check_mount_path(path: Path, what: str) -> None:
+        if "," in str(path) or "\n" in str(path):
+            raise SandboxError(f"{what} path must not contain ',' or a newline: it is spliced into a --mount option")
 
     def _placeholder_env(self, caller: Caller) -> dict[str, str]:
         """The placeholder tokens this agent's sandbox gets, as {env var: placeholder}. Refuses an agent that
@@ -196,6 +219,9 @@ class SandboxController:
 
     def _fence(self, caller: Caller) -> None:
         """Starting a sandbox with a newer epoch stops the old one; an older or equal epoch is refused."""
+        if self.proxy and caller.epoch < self.proxy.registry.newest_epoch(caller.session):
+            raise SandboxError(f"stale epoch {caller.epoch} for session {caller.session} "
+                               f"(registry has {self.proxy.registry.newest_epoch(caller.session)})")
         old = self._by_session.get(caller.session)
         if old and caller.epoch <= old.caller.epoch:
             raise SandboxError(f"stale epoch {caller.epoch} for session {caller.session} "

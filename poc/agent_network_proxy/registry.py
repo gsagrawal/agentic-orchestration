@@ -71,6 +71,9 @@ class Registry:
             data["epochs"][session] = max(data["epochs"].get(session, 0), epoch)
         self._update(change)
 
+    def newest_epoch(self, session: str) -> int:
+        return self._read()["epochs"].get(session, 0)
+
     # -- proxy side --------------------------------------------------------
 
     def lookup(self, ip: str) -> tuple[Caller, int] | None:

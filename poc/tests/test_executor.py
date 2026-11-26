@@ -2,7 +2,6 @@
 import json
 import subprocess
 import uuid
-import subprocess
 
 from agent_executor import AgentExecutor, ToolCall
 from agent_network_proxy.registry import Caller
@@ -104,3 +103,10 @@ def test_a_tool_the_executor_cannot_run_is_rejected_up_front(tmp_path):
     grants.write_text(json.dumps({"agents": {"a": {"tenant": "t", "tools": ["bash", "perl"], "destinations": {}}}}))
     with pytest.raises(ValueError, match="perl"):
         AgentExecutor(SandboxController(), grants, tmp_path / "log").run(Caller("s", "a", "t", 1), [], tmp_path / "wd")
+
+
+def test_an_unknown_agent_is_a_clear_error(tmp_path):
+    import pytest
+    from sandbox_controller import SandboxController
+    with pytest.raises(ValueError, match="unknown agent"):
+        AgentExecutor(SandboxController(), GRANTS, tmp_path / "log").run(Caller("s", "agent-typo", "tenant-a", 1), [], tmp_path / "wd")

@@ -209,3 +209,48 @@ def test_reap_clears_what_a_crashed_controller_left_behind(proxied, tmp_path):
     labelled = lambda *a: subprocess.run(["docker", *a, "--filter", "label=agent-sandbox=1", "-q"],
                                          capture_output=True, text=True).stdout.split()
     assert not labelled("ps", "-a") and not labelled("network", "ls")
+
+
+def test_stop_still_kills_the_sandbox_when_the_registry_is_broken(proxied, monkeypatch):
+    import pytest
+    ctl, sbx = proxied()
+    def boom(*a, **kw):
+        raise OSError("registry unwritable")
+    monkeypatch.setattr(proxied.registry, "unregister", boom)
+    with pytest.raises(OSError, match="registry unwritable"):
+        ctl.stop(sbx)
+    assert subprocess.run(["docker", "inspect", sbx.name], capture_output=True).returncode != 0   # killed regardless
+    nets = subprocess.run(["docker", "network", "ls", "-q", "--filter", f"name={sbx.network}"], capture_output=True, text=True)
+    assert not nets.stdout.split()
+
+
+def test_a_second_controller_still_refuses_a_stale_epoch(proxied, tmp_path):
+    import pytest
+    from sandbox_controller import SandboxController, SandboxError
+    ctl, current = proxied(session="two-ctl", epoch=3)
+    fresh = SandboxController(proxy=ctl.proxy)          # knows nothing in memory: only the registry remembers epoch 3
+    with pytest.raises(SandboxError, match="stale epoch"):
+        fresh.create(tmp_path / "z", Caller(current.caller.session, "agent-a", "tenant-a", 2))
+
+
+def test_reap_also_unregisters_what_it_kills(proxied):
+    ctl, sbx = proxied()
+    ctl.reap()
+    assert proxied.registry.lookup(sbx.ip) is None
+
+
+def test_a_comma_in_the_ca_path_is_refused(proxied, tmp_path):
+    import dataclasses
+    import pytest
+    from sandbox_controller import SandboxController, SandboxError
+    ctl, _ = proxied()
+    bad = SandboxController(proxy=dataclasses.replace(ctl.proxy, ca_cert=tmp_path / "x,readonly=false.pem"))
+    with pytest.raises(SandboxError, match="ca_cert path"):
+        bad.create(tmp_path / "wd", Caller("s-bad-ca", "agent-a", "tenant-a", 1))
+
+
+def test_dockerignore_keeps_state_out_of_the_build_context():
+    # Defence in depth. BuildKit only transfers files a COPY names (measured: 506 bytes with or without
+    # this file), but the legacy builder sends the whole directory, including the proxy's CA private key.
+    ignore = (STATE.parent / ".dockerignore").read_text().split()
+    assert ".state" in ignore and ".work" in ignore
