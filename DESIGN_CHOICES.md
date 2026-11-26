@@ -52,3 +52,7 @@ Open item (decide in step 7): `append()` checks only the epoch, so the last hold
 | 29 | Resume with a tool call in flight raises `NotImplementedError` until step 6. | Retry the call (unsafe for non-idempotent tools). | Fail closed. Labelled as a placeholder in code and tests; step 6 replaces it. |
 | 30 | `agent_id`/`agent_version` columns pin the definition at admission; the agent store is a JSON file. | Look up "latest" on each pickup. | Pinning is required by the architecture: edits must not change running sessions. |
 | 31 | Workers are `multiprocessing` "spawn" processes. | "fork". | A forked child would inherit the parent's open SQLite connections. |
+
+Open items from step 3 review:
+- An unexpected exception (bad agent id, unknown tool, the step-6 placeholder) kills the whole worker, and every session on it. Deliberate for now: swallowing it would make a broken session spin silently. Revisit with the reconciler (step 5) and caps (step 7).
+- A resumed `waiting` session would be released again immediately. Step 7 must add a human-response log entry and make `advance()` check for it before releasing.

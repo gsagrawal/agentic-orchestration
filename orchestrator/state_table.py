@@ -60,7 +60,8 @@ def assigned_to(conn: sqlite3.Connection, executor_id: str) -> list[tuple[str, i
 
 def release(conn: sqlite3.Connection, session_id: str, epoch: int, new_state: str) -> None:
     """The executor gives the session back: 'done' or 'waiting'. Fenced by the epoch."""
-    assert new_state in ("done", "waiting"), new_state
+    if new_state not in ("done", "waiting"):
+        raise ValueError(new_state)
     with write_txn(conn):
         row = conn.execute(
             "UPDATE sessions SET state = ?, executor_id = NULL "

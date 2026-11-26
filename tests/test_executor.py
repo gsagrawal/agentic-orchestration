@@ -24,7 +24,12 @@ def run_to_end(ex, limit=50):
 
 
 def log_shape(conn, sid):
-    return [(e["kind"], e["payload"].get("action", {}).get("do") or e["payload"].get("step")) for e in session_log.read(conn, sid)]
+    """[(kind, what)] where `what` is the model's action or the tool step: easy to compare."""
+    shape = []
+    for e in session_log.read(conn, sid):
+        what = e["payload"]["action"]["do"] if e["kind"] == "model" else e["payload"]["step"]
+        shape.append((e["kind"], what))
+    return shape
 
 
 def test_runs_script_to_done_and_logs_every_step(conn, db_path, agents_path):
@@ -121,6 +126,26 @@ def test_pending_tool_call_on_resume_fails_closed_until_step_6(conn, db_path, ag
     with pytest.raises(NotImplementedError):
         Executor(db_path, agents_path, "ex-2").tick()
     assert effect_counts(conn) == {}
+
+
+def test_executor_that_died_after_logging_finish_is_released_without_asking_the_model(conn, db_path, agents_path):
+    sid = new_session(conn, "two-tools")
+    e1 = state_table.assign(conn, sid, "ex-1")
+    for kind, payload in [
+        ("model", {"action": {"do": "tool", "tool": "lookup", "args": {"key": "a"}}}),
+        ("tool_result", {"step": 1, "result": {"value": "value-of-a"}}),
+        ("model", {"action": {"do": "finish"}}),  # logged; then ex-1 died before release()
+    ]:
+        session_log.append(conn, sid, e1, kind, payload)
+    state_table.assign(conn, sid, "ex-2")
+
+    class NoModelCalls(ScriptedModel):
+        def decide(self, agent, messages):
+            raise AssertionError("the model must not be asked again")
+
+    run_to_end(Executor(db_path, agents_path, "ex-2", model=NoModelCalls()))
+    assert state_table.get_session(conn, sid)["state"] == "done"
+    assert len(session_log.read(conn, sid)) == 3
 
 
 def test_session_is_pinned_to_its_agent_version(conn, db_path, agents_path):
