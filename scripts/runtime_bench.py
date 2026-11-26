@@ -43,8 +43,8 @@ async def throughput(env, address, n_sessions: int, n_workers: int) -> float:
         start = time.monotonic()
         handles = [
             await env.client.start_workflow(
-                AgentSession.run, SessionInput(f"b-{n_workers}-{i}", "t", trivial_agent(), "go"),
-                id=f"b-{workers.task_queue}-{i}", task_queue=workers.task_queue,
+                AgentSession.run, SessionInput(f"{workers.task_queue}-b-{i}", "t", trivial_agent(), "go"),
+                id=f"{workers.task_queue}-b-{i}", task_queue=workers.task_queue,
             )
             for i in range(n_sessions)
         ]
@@ -62,12 +62,11 @@ async def death_to_resume(env, address, trials: int) -> tuple[list[float], list[
     resume, finish = [], []
     try:
         for i in range(trials):
-            sid = f"d-{i}"
+            sid = f"{workers.task_queue}-d-{i}"  # session id and workflow id must be the same string
             handle = await env.client.start_workflow(
-                AgentSession.run, SessionInput(sid, "t", load_agent("setter", 1), "go"), id=f"{workers.task_queue}-{sid}",
-                task_queue=workers.task_queue,
+                AgentSession.run, SessionInput(sid, "t", load_agent("setter", 1), "go"), id=sid, task_queue=workers.task_queue,
             )
-            key = f"{handle.id}:0"
+            key = f"{sid}:0"
             while tools.state(key) != "started":  # the tool call is running on some worker
                 await asyncio.sleep(0.02)
             pid = tools.attempts_with_pid(key)[0][2]
