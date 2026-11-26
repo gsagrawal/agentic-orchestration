@@ -23,3 +23,16 @@ swappable state plumbing) are implemented as specified and are not repeated here
 | 12 | `synchronous=NORMAL`. | `FULL`. | Safe against `kill -9` (what the tests do) but may lose the last commits on OS crash or power loss. Chosen for speed; a real deployment would not accept this. |
 
 Open item (decide in step 7): `append()` checks only the epoch, so the last holder can still write to a session that has just gone terminal. The terminal transition should bump the epoch so the holder is fenced.
+
+## Step 2: tool service stub
+
+| # | Choice | Rejected alternative | Why |
+|---|--------|----------------------|-----|
+| 13 | The epoch is checked twice: once up front (fast reject), once inside the transaction that commits the effect. | Check once at the start. | A zombie can pass the first check and then sleep (a tool delay) while the session is reassigned. Only the in-transaction check stops it at the moment of the effect. Tested by changing the epoch from a fault hook. |
+| 14 | The stub is stronger than a real proxy: effect, result and epoch check commit atomically. Labelled as faked in `tool_service.py`. | Pretend the real proxy can do this. | It cannot for an external API. Only the idempotency key protects a request that was already forwarded. |
+| 15 | "Idempotent" means the backend dedupes on the key: effect and stored result commit together. A non-idempotent tool commits the effect first and records the result in a second step, so there is a window (effect, no result). | Same atomic commit for every tool. | Without the window, "non-idempotent tool with no recorded result" (decision 3) could never occur for real, and step 6 could not be tested honestly. |
+| 16 | The result of a non-idempotent call is stored even if the epoch changed during the window. | Reject it as stale. | The effect already happened; recording it is the truth. The zombie's log append is still fenced. |
+| 17 | No "started" intent record. `call()` on a non-idempotent tool with no stored result runs it again; the executor must decide not to call (step 6). | Service refuses to rerun a non-idempotent key that has no result. | Keeps to the brief: the "outcome unknown" rule lives in the executor. Cost: the service alone is not safe for non-idempotent retries (documented in the module docstring). |
+| 18 | A key reused with a different tool or args raises `KeyConflict`. | Silently return the stored result. | The step number is replayed deterministically from the log, so a mismatch means a bug; failing loudly beats returning a wrong result. |
+| 19 | The effects ledger has no unique constraint and is append-only (triggers). | Unique on (session, step). | A unique constraint would reject the second effect instead of recording it, hiding exactly what the tests must detect. |
+| 20 | `fault_hook(point)` with points `before_effect` / `after_effect`. | Sleep-and-hope timing in tests. | Deterministic: tests (and later real `kill -9`) land at exactly the window being tested. |
