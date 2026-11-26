@@ -134,3 +134,44 @@ def test_a_sandbox_whose_stop_failed_is_not_marked_stopped(proxied, monkeypatch)
     monkeypatch.undo()
     ctl.stop(sbx)
     assert sbx.stopped is True
+
+
+def test_cleanup_is_retried_for_every_sandbox_the_session_created(proxied, tmp_path, monkeypatch):
+    # The first sandbox's network fails to delete (after its command times out). Nothing else repairs that, so
+    # only a retry at the end of the session can: it must cover every sandbox, not just the latest.
+    ctl, ex = _executor(proxied, tmp_path)
+    before = _labelled()
+    real_remove, calls = ctl._remove_network, {"n": 0}
+    def flaky_remove(network):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("daemon briefly unavailable")
+        real_remove(network)
+    monkeypatch.setattr(ctl, "_remove_network", flaky_remove)
+    caller = Caller(f"s-retry-{uuid.uuid4().hex[:8]}", "agent-a", "tenant-a", 1)
+    ex.timeout_s = 1
+    results = ex.run(caller, [ToolCall("bash", "sleep 30"), ToolCall("bash", "echo ok")], tmp_path / "wd")
+    assert results[0]["result"]["timed_out"], results
+    assert results[1]["result"].get("stdout") == "ok\n", results
+    assert _labelled() == before                 # including the first sandbox's network
+
+
+def test_truncated_output_is_flagged(proxied, tmp_path):
+    from sandbox_controller import Limits
+    _, ex = _executor(proxied, tmp_path, limits=Limits(max_output_bytes=100))
+    results = ex.run(Caller(f"s-tr-{uuid.uuid4().hex[:8]}", "agent-a", "tenant-a", 1),
+                     [ToolCall("bash", "head -c 5000 /dev/zero | tr '\\0' x")], tmp_path / "wd")
+    assert results[0]["result"]["truncated"] is True and len(results[0]["result"]["stdout"]) == 100
+
+
+def test_a_corrupt_registry_is_a_step_error_not_a_crash(proxied, tmp_path):
+    ctl, ex = _executor(proxied, tmp_path)
+    path = proxied.registry.path
+    good = path.read_text()
+    path.write_text("{ not json")
+    try:
+        results = ex.run(Caller(f"s-cr-{uuid.uuid4().hex[:8]}", "agent-a", "tenant-a", 1),
+                         [ToolCall("bash", "true")], tmp_path / "wd")
+    finally:
+        path.write_text(good)
+    assert "error" in results[0]["result"]

@@ -11,7 +11,7 @@ every lookup: it is small, and any cache keyed on a file timestamp can serve
 stale data (coarse timestamps, e.g. on bind mounts), which here would mean
 trusting a caller that was already unregistered.
 
-Layout: {"callers": {ip: {...Caller, "sandbox": name}}, "epochs": {session: newest_epoch}}
+Layout: {"callers": {ip: {...Caller, "sandbox": name}}, "epochs": {"tenant/session": newest_epoch}}
 """
 from __future__ import annotations
 
@@ -31,6 +31,15 @@ class Caller:
     tenant: str
     epoch: int
 
+    @property
+    def key(self) -> str:
+        """Sessions are scoped to their tenant: one tenant's session id must never touch another's."""
+        return f"{self.tenant}/{self.session}"
+
+
+class RegistryError(OSError):
+    """The registry file cannot be read. An infrastructure failure, like any other unreadable state file."""
+
 
 class Registry:
     def __init__(self, path: Path):
@@ -41,6 +50,8 @@ class Registry:
             return json.loads(self.path.read_text())
         except FileNotFoundError:
             return {"callers": {}, "epochs": {}}
+        except json.JSONDecodeError as exc:
+            raise RegistryError(f"{self.path} is not valid JSON: {exc}") from exc
 
     def _update(self, change) -> None:
         with open(self.path.with_name(self.path.name + ".lock"), "a") as lock:
@@ -63,7 +74,7 @@ class Registry:
     def register(self, ip: str, caller: Caller, sandbox: str) -> None:
         def change(data):
             data["callers"][ip] = {**asdict(caller), "sandbox": sandbox}
-            data["epochs"][caller.session] = max(data["epochs"].get(caller.session, 0), caller.epoch)
+            data["epochs"][caller.key] = max(data["epochs"].get(caller.key, 0), caller.epoch)
         self._update(change)
 
     def unregister(self, sandbox: str) -> None:
@@ -71,18 +82,19 @@ class Registry:
             data["callers"] = {ip: c for ip, c in data["callers"].items() if c["sandbox"] != sandbox}
         self._update(change)
 
-    def bump_epoch(self, session: str, epoch: int) -> None:
-        """Fence: from now on the proxy rejects any caller of `session` older than `epoch`."""
+    def bump_epoch(self, key: str, epoch: int) -> None:
+        """Fence: from now on the proxy rejects any caller of session `key` (tenant/session) older than `epoch`."""
         def change(data):
-            data["epochs"][session] = max(data["epochs"].get(session, 0), epoch)
+            data["epochs"][key] = max(data["epochs"].get(key, 0), epoch)
         self._update(change)
 
-    def newest_epoch(self, session: str) -> int:
-        return self._read()["epochs"].get(session, 0)
+    def newest_epoch(self, key: str) -> int:
+        return self._read()["epochs"].get(key, 0)
 
-    def sandboxes(self, session: str) -> list[tuple[str, int]]:
-        """(sandbox name, epoch) for every sandbox registered to `session`."""
-        return [(c["sandbox"], c["epoch"]) for c in self._read()["callers"].values() if c["session"] == session]
+    def sandboxes(self, key: str) -> list[tuple[str, int]]:
+        """(sandbox name, epoch) for every sandbox registered to session `key` (tenant/session)."""
+        return [(c["sandbox"], c["epoch"]) for c in self._read()["callers"].values()
+                if f"{c['tenant']}/{c['session']}" == key]
 
     def clear(self) -> None:
         """Forget every caller (epochs are kept, so old executors stay fenced)."""
@@ -97,4 +109,4 @@ class Registry:
         if entry is None:
             return None
         caller = Caller(**{k: entry[k] for k in ("session", "agent", "tenant", "epoch")})
-        return caller, data["epochs"].get(caller.session, caller.epoch)
+        return caller, data["epochs"].get(caller.key, caller.epoch)

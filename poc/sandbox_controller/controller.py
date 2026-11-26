@@ -77,7 +77,7 @@ class SandboxController:
     def __init__(self, image: str = "agent-sandbox:poc", proxy: ProxyConfig | None = None,
                  docker: str = "docker"):
         self.image, self.proxy, self.docker = image, proxy, docker
-        self._by_session: dict[str, Sandbox] = {}
+        self._by_session: dict[str, Sandbox] = {}     # keyed by Caller.key (tenant/session)
         self._proxy_name: str | None = None
 
     # -- lifecycle ---------------------------------------------------------
@@ -92,12 +92,12 @@ class SandboxController:
             self._check_mount_path(Path(self.proxy.ca_cert).resolve(), "ca_cert")
         if self.proxy and caller is None:
             raise SandboxError("a proxied sandbox needs a caller identity to register")
-        env = self._placeholder_env(caller) if self.proxy else {}   # validates before anything is fenced or created
-        if caller:
-            self._fence(caller)
         if workdir.exists() and any(workdir.iterdir()) and not (workdir / WORKDIR_MARKER).exists():
             raise SandboxError(f"workdir {workdir} is not dedicated to a sandbox: it exists, is not empty, and was not "
                                "created by a sandbox controller (its mode would be changed to 0777 and it would be mounted writable)")
+        env = self._placeholder_env(caller) if self.proxy else {}   # all validation happens before anything is fenced or created
+        if caller:
+            self._fence(caller)
         workdir.mkdir(parents=True, exist_ok=True)
         (workdir / WORKDIR_MARKER).touch()
         workdir.chmod(0o777)
@@ -120,13 +120,13 @@ class SandboxController:
                 self.stop(sandbox)
             raise
         if caller:
-            self._by_session[caller.session] = sandbox
+            self._by_session[caller.key] = sandbox
         return sandbox
 
     def _run_args(self, sandbox: Sandbox, user: str, env: dict[str, str]) -> list[str]:
         limits = sandbox.limits
         return [
-            "run", "-d", "--rm", "--name", sandbox.name, "--label", LABEL,
+            "run", "-d", "--rm", "--pull", "never", "--name", sandbox.name, "--label", LABEL,
             "--read-only",
             "--tmpfs", f"/tmp:rw,noexec,nosuid,nodev,size={limits.tmpfs_mb}m",
             "--mount", f"type=bind,src={sandbox.workdir},dst=/work",
@@ -164,8 +164,8 @@ class SandboxController:
         gone = attempt(self._wait_until_gone, sandbox.name)
         if sandbox.network and gone:
             attempt(self._remove_network, sandbox.network)
-        if sandbox.caller and self._by_session.get(sandbox.caller.session) is sandbox:
-            del self._by_session[sandbox.caller.session]
+        if sandbox.caller and self._by_session.get(sandbox.caller.key) is sandbox:
+            del self._by_session[sandbox.caller.key]
         sandbox.stopped = not errors
         if errors:
             raise errors[0]
@@ -199,7 +199,7 @@ class SandboxController:
         Return only when it is really gone, so "stopped" means stopped (and its network can be removed)."""
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
-            if subprocess.run([self.docker, "inspect", name], capture_output=True).returncode != 0:
+            if not self._exists(name):
                 return
             time.sleep(0.05)
         raise SandboxError(f"{name} still exists {timeout_s}s after kill")
@@ -254,14 +254,14 @@ class SandboxController:
         Both the in-memory map and the registry are consulted, so a restarted or second controller is fenced too.
         Fencing happens before the new sandbox exists: if creating it then fails, the old one stays stopped and
         the epoch stays raised, because the newer executor now owns the session and retries."""
-        old = self._by_session.get(caller.session)
+        old = self._by_session.get(caller.key)
         if old and caller.epoch <= old.caller.epoch:
             raise SandboxError(f"stale epoch {caller.epoch} for session {caller.session} (current {old.caller.epoch})")
         if self.proxy:
             registry = self.proxy.registry
-            if caller.epoch < (newest := registry.newest_epoch(caller.session)):
+            if caller.epoch < (newest := registry.newest_epoch(caller.key)):
                 raise SandboxError(f"stale epoch {caller.epoch} for session {caller.session} (registry has {newest})")
-            for name, epoch in registry.sandboxes(caller.session):
+            for name, epoch in registry.sandboxes(caller.key):
                 if old is not None and name == old.name:
                     continue
                 if not self._exists(name):
@@ -270,12 +270,19 @@ class SandboxController:
                     raise SandboxError(f"session {caller.session} already has a live sandbox {name} at epoch {epoch}")
                 else:
                     self.stop(Sandbox(name=name, workdir=Path("."), limits=Limits(), network=f"agentpoc_{name}"))
-            registry.bump_epoch(caller.session, caller.epoch)       # fence at the proxy before anything else changes
+            registry.bump_epoch(caller.key, caller.epoch)       # fence at the proxy before anything else changes
         if old:
             self.stop(old)
 
     def _exists(self, name: str) -> bool:
-        return subprocess.run([self.docker, "inspect", name], capture_output=True).returncode == 0
+        """True/False only when the daemon actually answered. Any other failure (daemon unreachable, ...) is an
+        error: "I cannot tell" must never be read as "it is gone"."""
+        done = subprocess.run([self.docker, "inspect", name], capture_output=True, text=True)
+        if done.returncode == 0:
+            return True
+        if "no such" in done.stderr.lower():
+            return False
+        raise SandboxError(f"cannot tell whether {name} exists: {done.stderr.strip() or 'docker inspect failed'}")
 
     def _network_args(self, sandbox: Sandbox, env: dict[str, str]) -> list[str]:
         if self.proxy is None:
@@ -331,7 +338,11 @@ class SandboxController:
             return False
         running = subprocess.run([self.docker, "inspect", "-f", "{{.State.Running}}", sandbox.name],
                                  capture_output=True, text=True)
-        return running.returncode != 0 or running.stdout.strip() != "true"
+        if running.returncode == 0:
+            return running.stdout.strip() != "true"
+        if "no such" in running.stderr.lower():
+            return True
+        raise SandboxError(f"cannot tell whether {sandbox.name} is running: {running.stderr.strip()}")
 
     def _docker(self, args: list[str], what: str) -> str:
         done = subprocess.run([self.docker, *args], capture_output=True, text=True)

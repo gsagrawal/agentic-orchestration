@@ -5,7 +5,7 @@ defends against, and which test fails if the flag is removed. "Removed →
 fails" was checked by deleting the flag and re-running the test (see
 [mutation checks](#how-this-was-checked)).
 
-The command is built in `sandbox_controller/controller.py::create`.
+The command is built in `sandbox_controller/controller.py::_run_args`.
 
 ## Filesystem
 
@@ -46,6 +46,7 @@ not set by a flag and this PoC does not test it separately).
 | `sleep <deadline_s>` (the container's main process) | The container exists only as long as `sleep` does. When it exits, the container stops and the kernel kills everything in it. | The deadline being a promise made by the host process. If the controller, executor or host crashes, the sandbox still dies on schedule. |
 | `docker kill` on exec timeout | The controller kills the whole container, not just the `docker exec` client. | A timed-out command surviving: killing only the client leaves the process running in the container. Proved by `test_script_past_its_timeout_is_killed` (container is gone afterwards). |
 | `--rm` | Removes the container once it stops. | Leaked stopped containers; the name being reused. |
+| `--pull never` | Never fetches the image from a registry. | A missing local sandbox image silently becoming a pull of that name from a public registry. It is an error instead (`No such image`). |
 | `--init` | Runs a tiny init (tini) as PID 1. | Zombie processes piling up inside a long-lived sandbox; signals not being forwarded. |
 | `--name`, `--label agent-sandbox=1` | Names it; labels it so it can be listed (`docker ps --filter label=agent-sandbox=1`). | Orphans being untraceable. |
 | `--env HOME=/tmp`, `--env PYTHONDONTWRITEBYTECODE=1` | Points `$HOME` at the writable scratch; stops Python trying to write `.pyc` files onto the read-only root. | Tools failing for want of a writable home. |

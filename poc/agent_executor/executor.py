@@ -23,7 +23,11 @@ INTERPRETERS = {"bash": ["bash", "-c"], "python": ["python3", "-c"]}
 
 @dataclass
 class _Session:
-    sandbox: Sandbox | None = None
+    sandboxes: list[Sandbox] = dataclasses.field(default_factory=list)   # every sandbox this session created
+
+    @property
+    def sandbox(self) -> Sandbox | None:
+        return self.sandboxes[-1] if self.sandboxes else None
 
 
 @dataclass(frozen=True)
@@ -67,12 +71,13 @@ class AgentExecutor:
                     result = {"error": f"{type(exc).__name__}: {exc}"}
                 results.append(self._log(caller, step, call, result))
         finally:
-            if session.sandbox is not None and not session.sandbox.stopped:
-                try:
-                    self.controller.stop(session.sandbox)
-                except (SandboxError, OSError) as exc:        # do not throw away the work that was done
-                    results.append(self._log(caller, len(results) + 1, ToolCall("(cleanup)", ""),
-                                             {"error": f"cleanup failed: {type(exc).__name__}: {exc}"}))
+            for sandbox in session.sandboxes:           # every one, not just the latest: an earlier stop may have half-failed
+                if not sandbox.stopped:
+                    try:
+                        self.controller.stop(sandbox)
+                    except (SandboxError, OSError) as exc:        # do not throw away the work that was done
+                        results.append(self._log(caller, len(results) + 1, ToolCall("(cleanup)", ""),
+                                                 {"error": f"cleanup failed: {type(exc).__name__}: {exc}"}))
         return results
 
     def _run_step(self, session: "_Session", caller: Caller, call: ToolCall, workdir: Path, session_end: float) -> dict:
@@ -81,7 +86,7 @@ class AgentExecutor:
         for attempt in (1, 2):
             if session.sandbox is None or not session.sandbox.alive:    # lazy: only a call that needs code pays for one
                 lifetime = max(1, math.ceil(min(self.limits.deadline_s, session_end - time.monotonic())))
-                session.sandbox = self.controller.create(workdir, caller, dataclasses.replace(self.limits, deadline_s=lifetime))
+                session.sandboxes.append(self.controller.create(workdir, caller, dataclasses.replace(self.limits, deadline_s=lifetime)))
             remaining = session_end - time.monotonic()                 # after creation: creating a sandbox takes time
             if remaining <= 0:
                 return {"error": "session deadline reached"}
@@ -90,7 +95,7 @@ class AgentExecutor:
             except SandboxGone:
                 continue
             return {"exit_code": r.exit_code, "stdout": r.stdout, "stderr": r.stderr,
-                    "timed_out": r.timed_out, "duration_s": round(r.duration_s, 3)}
+                    "timed_out": r.timed_out, "truncated": r.truncated, "duration_s": round(r.duration_s, 3)}
         return {"error": "sandbox kept disappearing"}
 
     def _log(self, caller: Caller, step: int, call: ToolCall, result: dict) -> dict:

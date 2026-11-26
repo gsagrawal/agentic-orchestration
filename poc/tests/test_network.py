@@ -93,7 +93,7 @@ def test_zombie_with_a_stale_epoch_is_rejected_by_the_proxy(proxied):
     # Simulates the controller crashing after fencing but before killing the old sandbox.
     ctl, zombie = proxied(session="zombie", epoch=1)
     assert fetch(ctl, zombie, GITHUB).stdout.startswith("200 ")
-    proxied.registry.bump_epoch(zombie.caller.session, 2)
+    proxied.registry.bump_epoch(zombie.caller.key, 2)
     assert "403" in fetch(ctl, zombie, GITHUB).stdout
     assert [l for l in lines(AUDIT_LOG) if l["session"] == zombie.caller.session][-1]["reason"] == "stale epoch"
 
@@ -273,7 +273,7 @@ def test_a_newer_epoch_from_another_controller_stops_the_old_sandbox(proxied, tm
     new = fresh.create(tmp_path / "t", Caller(old.caller.session, "agent-a", "tenant-a", 2))
     try:
         assert subprocess.run(["docker", "inspect", old.name], capture_output=True).returncode != 0
-        assert [e for _, e in proxied.registry.sandboxes(old.caller.session)] == [2]
+        assert [e for _, e in proxied.registry.sandboxes(old.caller.key)] == [2]
     finally:
         fresh.stop(new)
 
@@ -387,8 +387,62 @@ def test_stop_survives_a_broken_docker_client(proxied):
         with pytest.raises(OSError):
             ctl.stop(sbx)
         assert not sbx.stopped
-        assert ctl._by_session.get(sbx.caller.session) is None      # in-memory state is cleaned regardless
+        assert sbx.caller.key not in ctl._by_session              # in-memory state is cleaned regardless
     finally:
         ctl.docker = real
         ctl.stop(sbx)                                                # and a retry then succeeds
     assert sbx.stopped
+
+
+def test_an_unreachable_daemon_is_not_mistaken_for_a_stopped_sandbox(proxied, tmp_path):
+    import pytest
+    from sandbox_controller import SandboxController, SandboxError
+    ctl, sbx = proxied()
+    broken = tmp_path / "docker"                            # a docker CLI that cannot reach its daemon
+    broken.write_text("#!/bin/sh\necho 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock' >&2\nexit 1\n")
+    broken.chmod(0o755)
+    real = ctl.docker
+    ctl.docker = str(broken)
+    try:
+        with pytest.raises(SandboxError, match="cannot tell"):
+            ctl._wait_until_gone(sbx.name)
+        with pytest.raises(Exception):
+            ctl.stop(sbx)
+        assert sbx.stopped is False                         # still running as far as anyone knows: retry later
+    finally:
+        ctl.docker = real
+        ctl.stop(sbx)
+    assert sbx.stopped
+
+
+def test_a_create_that_will_be_rejected_does_not_disturb_the_live_sandbox(proxied, tmp_path):
+    import pytest
+    from sandbox_controller import SandboxError
+    ctl, live = proxied(session="validate", epoch=1)
+    precious = tmp_path / "project"
+    precious.mkdir()
+    (precious / "file.txt").write_text("x")
+    with pytest.raises(SandboxError, match="not dedicated"):
+        ctl.create(precious, Caller(live.caller.session, "agent-a", "tenant-a", 2))
+    assert live.alive and subprocess.run(["docker", "inspect", live.name], capture_output=True).returncode == 0
+    assert proxied.registry.newest_epoch(live.caller.key) == 1          # and the epoch was not raised
+
+
+def test_session_ids_are_scoped_to_their_tenant(proxied, tmp_path):
+    ctl, a = proxied(session="shared-id", epoch=1)
+    b = ctl.create(tmp_path / "b", Caller(a.caller.session, "agent-b", "tenant-b", 2))     # same id, other tenant
+    try:
+        assert a.alive and subprocess.run(["docker", "inspect", a.name], capture_output=True).returncode == 0
+        assert proxied.registry.newest_epoch(a.caller.key) == 1
+    finally:
+        ctl.stop(b)
+
+
+def test_a_missing_image_fails_fast_instead_of_pulling(tmp_path):
+    import pytest
+    from sandbox_controller import SandboxController, SandboxError
+    # A missing local image must be "No such image", not an attempt to pull the name from a public registry
+    # ("pull access denied"): the sandbox image is built locally and must never be fetched from elsewhere.
+    with pytest.raises(SandboxError, match="No such image") as err:
+        SandboxController(image="agent-sandbox:does-not-exist").create(tmp_path / "w")
+    assert "pull access" not in str(err.value)
