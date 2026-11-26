@@ -9,7 +9,7 @@ from orchestrator import state_table
 from orchestrator.agent_store import AgentStore
 from orchestrator.errors import BudgetExceeded, QuotaExceeded, UnknownAgent
 from orchestrator.executor import Executor
-from orchestrator.session_manager import ManagerConfig, SessionManager
+from orchestrator.session_manager import ManagerConfig, SessionEngine, SessionManager
 
 
 def make_manager(db_path, agents_path, now=1000.0, **config):
@@ -131,3 +131,19 @@ def test_admit_assign_and_run_end_to_end(conn, db_path, agents_path):
     for _ in range(10):
         ex.tick()
     assert mgr.get_status(sid)["state"] == "done"
+
+
+def test_session_manager_satisfies_the_engine_interface(db_path, agents_path):
+    assert isinstance(make_manager(db_path, agents_path), SessionEngine)
+
+
+def test_reconcile_skips_a_session_that_ended_between_listing_and_assigning(conn, db_path, agents_path, monkeypatch):
+    state_table.register_executor(conn, "ex-1", 0)
+    mgr = make_manager(db_path, agents_path)
+    ended = mgr.start_session("t", "two-tools")
+    live = mgr.start_session("t", "two-tools")
+    conn.execute("UPDATE sessions SET state = 'cancelled' WHERE id = ?", (ended,))
+    monkeypatch.setattr(state_table, "unassigned_sessions", lambda c: [ended, live])  # the stale listing
+    mgr.reconcile_once()
+    assert mgr.get_status(ended)["state"] == "cancelled"
+    assert mgr.get_status(live)["state"] == "running"

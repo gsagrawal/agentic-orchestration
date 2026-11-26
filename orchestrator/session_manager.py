@@ -11,14 +11,15 @@ The manager only READS budget status (tenant_budget); it never sums usage.
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Callable, Protocol
+from typing import Callable, Protocol, runtime_checkable
 
 from . import state_table
 from .agent_store import AgentStore
 from .db import connect, write_txn
-from .errors import BudgetExceeded, QuotaExceeded
+from .errors import BudgetExceeded, QuotaExceeded, SessionClosed
 
 
+@runtime_checkable
 class SessionEngine(Protocol):
     def start_session(self, tenant: str, agent_id: str) -> str: ...
     def get_status(self, session_id: str) -> dict: ...
@@ -74,7 +75,10 @@ class SessionManager:
             executor_id = state_table.least_loaded_executor(self.conn)
             if executor_id is None:
                 return  # no executors yet; the sessions stay 'created' and are retried next time
-            state_table.assign(self.conn, session_id, executor_id)
+            try:
+                state_table.assign(self.conn, session_id, executor_id)
+            except SessionClosed:
+                continue  # it ended between listing and assigning; nothing to do
 
     def run_forever(self, interval: float = 0.05) -> None:
         while True:
