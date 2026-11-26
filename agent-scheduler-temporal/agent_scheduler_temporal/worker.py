@@ -7,6 +7,7 @@ shared by every worker process pointed at the same directory.
 """
 import argparse
 import asyncio
+import signal
 from datetime import timedelta
 from pathlib import Path
 
@@ -42,11 +43,14 @@ def build_activities(data_dir: str, tool_delay_s: float = 0.0) -> Activities:
 async def run_worker(address: str, data_dir: str, tool_delay_s: float = 0.0, task_queue: str = TASK_QUEUE) -> None:
     client = await Client.connect(address)
     acts = build_activities(data_dir, tool_delay_s)
+    stop = asyncio.Event()
+    for sig in (signal.SIGTERM, signal.SIGINT):  # a polite stop; kill -9 is the case the tests use
+        asyncio.get_running_loop().add_signal_handler(sig, stop.set)
     async with Worker(
         client, task_queue=task_queue, workflows=[AgentSession], activities=acts.all,
         sticky_queue_schedule_to_start_timeout=STICKY_TIMEOUT,
     ):
-        await asyncio.Event().wait()  # run until killed
+        await stop.wait()
 
 
 if __name__ == "__main__":

@@ -109,7 +109,7 @@ async def test_model_is_told_when_the_sandbox_was_recreated(env, tool_service, t
                 self.lose(session_id)
             return super().ensure(session_id)
 
-    sbx, model = DiesAfterFirstUse(str(tmp_path / "s2.db")), ScriptedModel()
+    sbx, model = DiesAfterFirstUse(str(tmp_path / "s2.db")), ScriptedModel(record=True)
     acts = Activities(tool_service, sbx, model=model)
     script = [tool("run_code"), tool("run_code"), {"do": "finish"}]
     async with Worker(env.client, task_queue="q-recreated", workflows=[AgentSession], activities=acts.all):
@@ -126,3 +126,14 @@ async def test_an_unknown_model_action_fails_the_session_instead_of_retrying_for
 
     with pytest.raises(WorkflowFailureError):
         await run_session(agent([{"do": "dance"}]))
+
+
+async def test_a_tool_the_service_has_no_metadata_for_fails_the_session_instead_of_retrying_forever(run_session):
+    from temporalio.client import WorkflowFailureError
+
+    from agent_scheduler_temporal.tools import ToolSpec
+
+    ghost = ToolSpec("ghost", "api", idempotent=True, timeout_s=10, grant="read")
+    broken = AgentVersion("a", 1, [ghost], ["read"], 5, [tool("ghost"), {"do": "finish"}])
+    with pytest.raises(WorkflowFailureError):
+        await run_session(broken)

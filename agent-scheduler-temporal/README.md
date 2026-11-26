@@ -10,7 +10,7 @@ happens twice.
 
 ```
 make test               # unit tests, Temporal test environment with time skipping (~20 s)
-make test-integration   # dev server + real worker processes: kill -9, zombie, chaos (~3 min)
+make test-integration   # dev server + real processes: kill -9, zombie, chaos, HTTP server (~3 min)
 make demo               # one session run to the end on a worker process
 make bench              # prints the measurements below (several minutes)
 ```
@@ -27,6 +27,7 @@ CLI or Docker step, but the host `temporal.download` must be reachable. Install:
 | `api.py`, `session_manager.py` | session-manager: HTTP API (FastAPI), admission, per-tenant quotas, reply / message / stop |
 | `workflow.py`, `activities.py`, `models.py` | agent-executor: the `AgentSession` workflow and its activities |
 | `worker.py` | agent-executor: worker process |
+| `server.py` | session-manager: runs the HTTP API (`python -m agent_scheduler_temporal.server`) |
 | `tool_service.py`, `tools.py` | tool service: results by key, started markers, attempt fencing, effects ledger; tool metadata |
 | `fault.py`, `harness.py`, `chaos.py`, `invariants.py` | test support: fault injection, worker processes, chaos run, end-of-run checks |
 
@@ -74,12 +75,18 @@ CLI or Docker step, but the host `temporal.download` must be reachable. Install:
   reports "outcome unknown" instead of running. The hazard is that the effect can land after the
   session has moved on, and the model may act on "unknown" (for instance by trying again under a new
   step, a new key). Not tested: the chaos run uses SIGKILL, which cannot act after dying.
+- **History is carried whole through continue-as-new.** That bounds the number of Temporal events,
+  not the size of the payload; a long session with real model output would hit Temporal's payload
+  size limit. A real design keeps the history in the session log (object store) and carries a
+  pointer. Not measured here: the fake steps are a few hundred bytes.
 - **A session stopped by the active-run limit gets no cleanup**, so its sandbox is not stopped by
   the workflow (the real sandbox controller has its own deadline; the fake would leak).
 - **The active-run limit is a lifetime limit** (it includes waiting); see DESIGN_CHOICES 32.
 - No real agent-crud-service, ingress/auth, sandbox, model, secret-manager or network proxy.
   No `reject` response, no cancel of a human wait other than stop, no per-tenant worker pools.
 - No metrics, tracing or audit store. Usage and cost totals are not tracked.
+- Each tool call holds a thread for its whole duration (Python's default pool, a few per core), which
+  caps concurrent tool calls per worker. Not tuned or measured.
 - The reply/message/stop API takes a session id the caller already knows; there is no status or list endpoint.
 - The manager's quota table is one SQLite file; it is not safe to run more than one manager against
   a real shared database without redesign.
@@ -105,7 +112,7 @@ server, the workers and the client all compete; they are not capacity numbers.
 | Fencing: a frozen worker, resumed after another finished, is rejected and causes no second effect | `test_crash.py::test_a_frozen_worker_...` |
 | Crash recovery: `kill -9` at four points (before marker, before effect, after effect, after result), idempotent and non-idempotent; `kill -9` from outside mid-call | `test_crash.py` |
 | "Outcome unknown" appears in the model's input and the call is not repeated; no marker means run | `test_crash.py`, `test_tool_service.py` |
-| Humans: reply for the open step, wrong step, duplicate, after expiry (410), tenant and responder checks, message during a tool call, stop | `test_api.py` |
+| Humans: reply for the open step, wrong step, duplicate, after the session ended or expired (410), no worker to answer (503), tenant and responder checks, message during a tool call, stop, agent version pinned for the session | `test_api.py` |
 | Limits: tenant quota isolation; poison script and step cap; waiting expiry; waiting holds no worker; execution timeout; continue-as-new | `test_api.py`, `test_workflow.py`, `test_limits.py` |
 | Invariant under chaos: 24 sessions, 4 workers, random SIGKILLs, no duplicate effect | `test_chaos.py` (+ `test_invariants.py` proves the checker can fail) |
 

@@ -12,8 +12,15 @@ from agent_scheduler_temporal.tools import FakeTools
 DEFAULT_PATH = Path(__file__).with_name("agents.json")
 
 
+class UnknownAgent(Exception):
+    """No such agent or version in the store."""
+
+
 def load_agent(agent_id: str, version: int, path: Path = DEFAULT_PATH) -> AgentVersion:
-    data = json.loads(path.read_text())[agent_id][str(version)]
+    try:
+        data = json.loads(path.read_text())[agent_id][str(version)]
+    except KeyError:
+        raise UnknownAgent(f"{agent_id} version {version}") from None
     return AgentVersion(
         agent_id=agent_id,
         version=version,

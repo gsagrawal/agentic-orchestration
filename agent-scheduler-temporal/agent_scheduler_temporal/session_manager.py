@@ -5,11 +5,12 @@ Admission is checked before the workflow is started. The manager keeps one small
 """
 import sqlite3
 import uuid
-from datetime import timedelta
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 
 from temporalio.client import Client, WorkflowExecutionStatus
+from temporalio.service import RPCError, RPCStatusCode
 
 from agent_scheduler_temporal.agent_store import DEFAULT_PATH, load_agent
 from agent_scheduler_temporal.db import txn
@@ -46,6 +47,10 @@ class NotOpenStep(Exception):
     """The session is not waiting at the step this reply is for."""
 
 
+class Unavailable(Exception):
+    """The session could not answer in time (for example no worker is running to answer a query)."""
+
+
 @dataclass
 class Quotas:
     default_max_active: int = 5
@@ -56,12 +61,16 @@ class Quotas:
 
 
 class SessionManager:
-    def __init__(self, client: Client, db_path: str, quotas: Quotas, task_queue: str = TASK_QUEUE, agents_path: Path = DEFAULT_PATH):
+    def __init__(
+        self, client: Client, db_path: str, quotas: Quotas, task_queue: str = TASK_QUEUE,
+        agents_path: Path = DEFAULT_PATH, query_timeout_s: float = 5.0,
+    ):
         self._client = client
         self._db = db_path
         self._quotas = quotas
         self._task_queue = task_queue
         self._agents_path = agents_path
+        self._query_timeout = timedelta(seconds=query_timeout_s)
         conn = sqlite3.connect(db_path)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(SCHEMA)
@@ -99,8 +108,13 @@ class SessionManager:
         with txn(self._db) as c:
             ids = [r[0] for r in c.execute("SELECT session_id FROM sessions WHERE tenant = ? AND active = 1", (tenant,))]
         for session_id in ids:
-            desc = await self._client.get_workflow_handle(session_id).describe()
-            if desc.status != WorkflowExecutionStatus.RUNNING:
+            try:
+                running = (await self._client.get_workflow_handle(session_id).describe()).status == WorkflowExecutionStatus.RUNNING
+            except RPCError as e:
+                if e.status != RPCStatusCode.NOT_FOUND:
+                    raise
+                running = False  # a row whose workflow never started (we died between insert and start)
+            if not running:
                 with txn(self._db) as c:
                     c.execute("UPDATE sessions SET active = 0 WHERE session_id = ?", (session_id,))
 
@@ -108,7 +122,11 @@ class SessionManager:
 
     async def reply(self, tenant: str, user: str, session_id: str, step: int, text: str) -> None:
         handle = await self._open_handle(tenant, user, session_id)
-        if await handle.query(AgentSession.open_step) != step:
+        try:  # a query is answered by a worker, so with none running it would wait: bound it
+            open_step = await handle.query(AgentSession.open_step, rpc_timeout=self._query_timeout)
+        except RPCError as e:
+            raise Unavailable(f"session {session_id} did not answer: {e.message}") from e
+        if open_step != step:
             raise NotOpenStep(f"session {session_id} is not waiting at step {step}")
         await handle.signal(AgentSession.reply, ReplySignal(step, text))
         # Between the query and the signal the step can close. The workflow is the authority: it

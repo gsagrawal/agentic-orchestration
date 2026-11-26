@@ -3,7 +3,7 @@ import threading
 
 import pytest
 
-from agent_scheduler_temporal.tool_service import OK, OUTCOME_UNKNOWN, StaleAttempt, ToolService
+from agent_scheduler_temporal.tool_service import OK, OUTCOME_UNKNOWN, StaleAttempt, ToolService, UnknownTool
 from agent_scheduler_temporal.tools import FakeTools
 
 
@@ -128,3 +128,10 @@ def test_concurrent_calls_with_the_same_key_give_one_effect(path, tool):
     assert svc.ledger.count("s1:1") == 1
     if tool == "send_email":  # one runs; the rest see the marker and must not run it
         assert sorted(r.status for r in results).count(OK) == 1
+
+
+def test_a_tool_with_no_metadata_is_refused_before_anything_is_recorded(path):
+    svc = ToolService(path)
+    with pytest.raises(UnknownTool):
+        svc.execute("s1:1", 1, "no_such_tool", {})
+    assert svc.state("s1:1") == "none"

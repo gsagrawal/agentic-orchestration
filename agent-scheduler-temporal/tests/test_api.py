@@ -38,6 +38,18 @@ async def test_unknown_agent_is_404_and_takes_no_quota(make_api):
     assert (await start(api, "acme")).status_code == 201
 
 
+async def test_a_quota_row_whose_workflow_never_started_does_not_block_the_tenant(make_api, tmp_path):
+    import sqlite3
+
+    api = make_api(Quotas(default_max_active=1), "q-step4-orphan")
+    # The manager died after inserting the row and before starting the workflow.
+    conn = sqlite3.connect(tmp_path / "sessions.db")
+    conn.execute("INSERT INTO sessions VALUES ('acme-ghost', 'acme', 'u1', 1)")
+    conn.commit()
+    conn.close()
+    assert (await start(api, "acme")).status_code == 201  # the dead row is released, not an error
+
+
 async def test_quota_slot_is_freed_when_a_session_finishes(env, make_api, tmp_path):
     api = make_api(Quotas(default_max_active=1), "q-step4-c")
     first = await start(api, "acme")
@@ -143,3 +155,39 @@ async def test_stop_while_waiting_for_a_human_ends_the_session(env, tmp_path):
         await wait_until(lambda: s._is(sid, 0))
         await s.post(sid, "stop")
         assert (await s.handle(sid).result()).status == "stopped"
+
+
+async def test_reply_when_no_worker_can_answer_is_503_not_a_hang(env, tmp_path):
+    s = System(env, tmp_path, "q-s5-h", query_timeout_s=0.5)  # note: the worker is never started
+    sid = await s.start("asker")
+    r = await s.post(sid, "replies", {"step": 0, "text": "x"})
+    assert r.status_code == 503
+
+
+async def test_reply_after_the_waiting_timer_expired_is_gone(env, tmp_path):
+    async with System(env, tmp_path, "q-s5-i") as s:
+        sid = await s.start("asker")  # wait_expiry_s = 1800
+        await wait_until(lambda: s._is(sid, 0))
+        await s.skip(1801)
+        assert (await s.handle(sid).result()).status == "expired"
+        assert (await s.post(sid, "replies", {"step": 0, "text": "too late"})).status_code == 410
+
+
+async def test_the_agent_version_is_pinned_for_the_session(env, tmp_path):
+    import json
+    import shutil
+
+    from agent_scheduler_temporal.agent_store import DEFAULT_PATH
+
+    agents = tmp_path / "agents.json"
+    shutil.copy(DEFAULT_PATH, agents)
+    async with System(env, tmp_path, "q-s5-j", agents_path=agents) as s:
+        sid = await s.start("asker")  # step 1 of its script is a lookup
+        await wait_until(lambda: s._is(sid, 0))
+        data = json.loads(agents.read_text())  # the agent is edited while the session waits
+        data["asker"]["1"]["script"][1] = {"do": "tool", "tool": "send_email", "args": {}}
+        agents.write_text(json.dumps(data))
+        await s.post(sid, "replies", {"step": 0, "text": "yes"})
+        result = await s.handle(sid).result()
+        assert [m["tool"] for m in result.history if m["role"] == "tool"] == ["lookup"]  # the old version
+

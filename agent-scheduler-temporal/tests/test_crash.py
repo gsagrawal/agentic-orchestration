@@ -4,6 +4,7 @@ Needs the Temporal dev server: `make test-integration`.
 Timing: heartbeat timeout is 3 s (models.py), so each recovery takes a few seconds.
 """
 import asyncio
+import os
 
 import pytest
 
@@ -15,7 +16,7 @@ from tests.helpers import model_inputs, wait_until
 
 pytestmark = pytest.mark.integration
 
-# agent, tool, step-0 status and effect count after recovery, per kill point.
+# Step-0 status the model sees and the number of real effects after recovery, per kill point.
 IDEMPOTENT = {  # set_value: re-running is safe, so every point ends with status ok and one effect
     "before_marker": ("ok", 1), "before_effect": ("ok", 1), "after_effect": ("ok", 1), "after_result": ("ok", 1),
 }
@@ -57,7 +58,7 @@ async def test_idempotent_tool_gives_exactly_one_effect_whenever_the_worker_dies
     assert [m["status"] for m in result.history if m["role"] == "tool"] == ["ok", "ok"]
     assert tools.ledger.count(key) == 1
     assert tools.ledger.duplicates() == []
-    assert max(a for a, _ in tools.attempts(key)) >= 2 or point == "after_result"  # it really was retried
+    assert max(a for a, _ in tools.attempts(key)) >= 2  # it really was retried
 
 
 @pytest.mark.parametrize("point", NON_IDEMPOTENT)
@@ -98,7 +99,7 @@ async def test_a_frozen_worker_cannot_cause_a_second_effect_when_it_wakes(dev_en
     rejected by the tool service. send_email is NOT idempotent, so only the fence protects it."""
     a = workers.spawn(fault="before_marker:stop")
     handle = await start_session(dev_env, workers, "mailer", "zombie-1")
-    await wait_until(lambda: a.fault_file and __import__("os").path.exists(a.fault_file), timeout=30)
+    await wait_until(lambda: os.path.exists(a.fault_file), timeout=30)
     workers.spawn()  # worker B
     result = await asyncio.wait_for(handle.result(), timeout=60)
     tools = ToolService(f"{workers.data_dir}/tools.db")

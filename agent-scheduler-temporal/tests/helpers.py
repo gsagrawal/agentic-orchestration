@@ -51,16 +51,18 @@ def start(api, tenant, user="u1", agent="researcher"):
 class System:
     """A manager + API + in-process worker over one tmp dir, with an inspectable model."""
 
-    def __init__(self, env, tmp_path, task_queue, tool_delay_s=0.0, quotas=None, worker_options=None):
+    def __init__(self, env, tmp_path, task_queue, tool_delay_s=0.0, quotas=None, worker_options=None,
+                 agents_path=None, query_timeout_s=5.0):
         self.env = env
         self.task_queue = task_queue
         self.tools = ToolService(str(tmp_path / "t.db"), tools=FakeTools(delay_s=tool_delay_s))
         self.notifier = FakeNotifier(str(tmp_path / "n.db"))
-        self.model = ScriptedModel()
+        self.model = ScriptedModel(record=True)
         self.sandbox = FakeSandboxController(str(tmp_path / "s.db"))
         acts = Activities(self.tools, self.sandbox, self.notifier, self.model)
         self.worker = Worker(env.client, task_queue=task_queue, workflows=[AgentSession], activities=acts.all, **(worker_options or {}))
-        manager = SessionManager(env.client, str(tmp_path / "m.db"), quotas or Quotas(default_max_active=50), task_queue=task_queue)
+        manager = SessionManager(env.client, str(tmp_path / "m.db"), quotas or Quotas(default_max_active=50), task_queue=task_queue,
+                                  **({"agents_path": agents_path} if agents_path else {}), query_timeout_s=query_timeout_s)
         self.api = httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(manager)), base_url="http://api")
 
     async def __aenter__(self):

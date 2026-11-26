@@ -12,7 +12,13 @@ from agent_scheduler_temporal.models import HEARTBEAT_INTERVAL_S, HumanRequest, 
 from agent_scheduler_temporal.notifier import FakeNotifier
 from agent_scheduler_temporal.sandbox import FakeSandboxController
 from agent_scheduler_temporal.scripted_model import ScriptedModel
-from agent_scheduler_temporal.tool_service import StaleAttempt, ToolService
+from agent_scheduler_temporal.tool_service import StaleAttempt, ToolService, UnknownTool
+
+
+def _consume(future: asyncio.Future) -> None:
+    """Mark a finished future's outcome as seen, so an abandoned tool call does not log a warning."""
+    if not future.cancelled():
+        future.exception()
 
 
 class Activities:
@@ -34,11 +40,11 @@ class Activities:
 
     @activity.defn
     async def ensure_sandbox(self, session_id: str) -> bool:
-        return self._sandbox.ensure(session_id)
+        return await asyncio.to_thread(self._sandbox.ensure, session_id)  # SQLite: keep it off the event loop
 
     @activity.defn
     async def stop_sandbox(self, session_id: str) -> None:
-        self._sandbox.stop(session_id)
+        await asyncio.to_thread(self._sandbox.stop, session_id)
 
     @activity.defn
     async def run_tool(self, call: ToolCall) -> dict:
@@ -59,16 +65,21 @@ class Activities:
         except StaleAttempt as e:
             # A newer attempt owns this key. Retrying this one can never help.
             raise ApplicationError(str(e), type="StaleAttempt", non_retryable=True)
+        except UnknownTool as e:
+            raise ApplicationError(f"no metadata for tool {e}", type="UnknownTool", non_retryable=True)
+        except asyncio.CancelledError:
+            running.add_done_callback(_consume)  # the thread cannot be interrupted; let it finish quietly
+            raise
         return {"status": result.status, "value": result.value}
 
     @activity.defn
     async def request_human(self, req: HumanRequest) -> bool:
         """Sends the notification once per (session, step); a retry finds the key and sends nothing."""
-        return self._notifier.notify(f"{req.session_id}:{req.step}", req.question)
+        return await asyncio.to_thread(self._notifier.notify, f"{req.session_id}:{req.step}", req.question)
 
     @activity.defn
     async def mark_expired(self, session_id: str) -> None:
-        self._notifier.expire(session_id)
+        await asyncio.to_thread(self._notifier.expire, session_id)
 
     @property
     def all(self):

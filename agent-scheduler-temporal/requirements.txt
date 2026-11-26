@@ -1,6 +1,7 @@
-temporalio>=1.37
-fastapi
-httpx
-pytest
-pytest-asyncio
-uvicorn
+# Versions the tests were run with (Python 3.13).
+temporalio==1.37.0
+fastapi==0.165.0
+httpx==0.28.1
+uvicorn==0.54.0
+pytest==9.1.1
+pytest-asyncio==1.5.0

@@ -86,8 +86,11 @@ class AgentSession:
                 if step >= agent.step_cap:
                     status = "step_cap"
                     break
-                if agent.continue_after_steps and step - first_step_of_run >= agent.continue_after_steps:
+                too_many_steps = agent.continue_after_steps and step - first_step_of_run >= agent.continue_after_steps
+                if too_many_steps or workflow.info().is_continue_as_new_suggested():
                     # Long history: start a fresh run, carrying the history forward. The sandbox is kept.
+                    # (is_continue_as_new_suggested is Temporal telling us the run is getting too big;
+                    # continue_after_steps is our own earlier threshold, set small in tests.)
                     continuing = True
                     workflow.continue_as_new(SessionInput(
                         inp.session_id, inp.tenant, agent, inp.message,

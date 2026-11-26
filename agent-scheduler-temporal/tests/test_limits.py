@@ -71,8 +71,9 @@ async def test_session_past_the_active_run_limit_is_stopped_by_the_execution_tim
 
 
 async def test_runaway_active_session_is_stopped_by_the_execution_timeout(env, tmp_path):
-    # A busy loop that the step cap would not stop in time: cap is huge, limit is 5 s.
-    async with System(env, tmp_path, "q-s7-d") as s:
+    # An active loop that the step cap would not stop in time: cap is huge, limit is 5 s. Each tool
+    # call takes real time (0.5 s), so the session is busy, not waiting, when the limit hits.
+    async with System(env, tmp_path, "q-s7-d", tool_delay_s=0.5) as s:
         handle = await start_direct(s, build([tool("lookup")], loop=True, step_cap=10**9), "runaway-1",
                                     execution_timeout=timedelta(seconds=5))
         with pytest.raises(WorkflowFailureError) as e:

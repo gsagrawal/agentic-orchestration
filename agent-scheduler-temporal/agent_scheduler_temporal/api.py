@@ -6,8 +6,9 @@ headers, and are trusted. A real ingress would set them after authenticating.
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
+from agent_scheduler_temporal.agent_store import UnknownAgent
 from agent_scheduler_temporal.session_manager import (
-    NotOpenStep, NotResponder, QuotaExceeded, SessionClosed, SessionManager, UnknownSession,
+    NotOpenStep, NotResponder, QuotaExceeded, SessionClosed, SessionManager, Unavailable, UnknownSession,
 )
 
 
@@ -40,11 +41,12 @@ def create_app(manager: SessionManager) -> FastAPI:
             session_id = await manager.start(x_tenant, x_user, body.agent_id, body.version, body.message)
         except QuotaExceeded as e:
             raise HTTPException(status_code=429, detail=str(e))
-        except KeyError:
+        except UnknownAgent:
             raise HTTPException(status_code=404, detail="unknown agent or version")
         return {"session_id": session_id}
 
-    # Error mapping: unknown/other tenant -> 404, wrong user -> 403, ended -> 410, wrong step -> 409.
+    # Error mapping: unknown/other tenant -> 404, wrong user -> 403, ended -> 410, wrong step -> 409,
+    # session did not answer in time -> 503.
     async def call(coro):
         try:
             await coro
@@ -56,6 +58,8 @@ def create_app(manager: SessionManager) -> FastAPI:
             raise HTTPException(status_code=410, detail="session has ended")
         except NotOpenStep as e:
             raise HTTPException(status_code=409, detail=str(e))
+        except Unavailable as e:
+            raise HTTPException(status_code=503, detail=str(e))
         return {"accepted": True}
 
     @app.post("/sessions/{session_id}/replies", status_code=202)

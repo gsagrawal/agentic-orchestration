@@ -44,6 +44,9 @@ Running list. Each entry: what I chose, what I rejected.
     inspects history (not needed until step 6 asks for the model's input to be checked).
 16. **`finally` stops the sandbox.** Does not yet handle workflow cancellation; revisited with the
     stop signal (step 5).
+17. **An unknown model action, or a tool the service has no metadata for, fails the session** (non
+    retryable error). Both are data errors; a plain exception would make Temporal retry forever.
+
 ## Steps 4-5: session manager, signals, API
 
 18. **Quota counts running sessions, and a slot is freed lazily.** At admission the manager asks
@@ -116,3 +119,25 @@ Running list. Each entry: what I chose, what I rejected.
     unrecorded effect, wrong "ok", leaked sandbox...), so it is known to be able to fail.
 40. **Benchmark numbers are printed by the script from the run that produced them.** One machine,
     everything shared (dev server, workers, client). No numbers are written by hand.
+
+## Review round 1
+
+41. **Quota rows whose workflow never started are released**, not treated as an error. The manager
+    can die between inserting the row and starting the workflow; `describe` then says NOT_FOUND.
+42. **A query to a session is bounded (5 s default) and answers 503.** A query is answered by a
+    worker; with none running it would wait. Signals and `describe` are answered by the server and
+    are not bounded.
+43. **Continue-as-new also fires when Temporal suggests it** (`is_continue_as_new_suggested`), not
+    only at our own `continue_after_steps`. The suggestion needs no invented threshold. Not covered
+    by a test: reaching it needs a very long history.
+44. **Blocking SQLite calls in activities run in threads.** The sandbox, notifier and tool service
+    each held the event loop (and the heartbeat) while waiting for a lock.
+45. **The fake sandbox uses one transaction per call** (it had a read-then-write race and leaked
+    connections).
+46. **The scripted model records what it was shown only on request** (`record=True`, tests). A
+    long-lived worker would otherwise keep every request in memory.
+47. **The HTTP server is a runnable module** (`server.py`) and has an integration test. Before, the
+    API was only reachable through the test client.
+48. **Worker handles SIGTERM and SIGINT by shutting down cleanly.** `kill -9` is still what the
+    crash tests use.
+49. **Requirements are pinned to the versions the tests ran with.**
