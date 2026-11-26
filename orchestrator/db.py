@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     executor_id   TEXT,                       -- NULL when no executor holds the session
     epoch         INTEGER NOT NULL DEFAULT 0, -- bumped on every assignment
     run_deadline  REAL,                       -- active-run limit (unix seconds)
+    wait_timeout  REAL NOT NULL,              -- how long this session may wait for a human (seconds)
     wait_deadline REAL,                       -- waiting expiry (unix seconds), set while waiting
     step_cap      INTEGER NOT NULL,           -- max tool calls for this session
     step_count    INTEGER NOT NULL DEFAULT 0, -- tool calls made so far

@@ -31,7 +31,8 @@ class ManagerConfig:
     max_live_per_tenant: int = 10
     tenant_overrides: dict[str, int] = field(default_factory=dict)  # tenant -> its own limit
     step_cap: int = 50
-    run_limit_seconds: float = 300.0
+    run_limit_seconds: float = 300.0   # active-run limit, counted from admission
+    wait_timeout_seconds: float = 3600.0  # how long a session may wait for a human
     # An executor is dead if its last heartbeat is older than this. Must exceed the executor's
     # heartbeat interval plus its longest single loop iteration (a long tool call).
     lease_seconds: float = 3.0
@@ -63,6 +64,7 @@ class SessionManager:
             state_table.create_session(
                 self.conn, session_id, tenant, self.config.step_cap, agent_id, version,
                 run_deadline=self.clock() + self.config.run_limit_seconds,
+                wait_timeout=self.config.wait_timeout_seconds,
             )
         return session_id
 
@@ -72,12 +74,19 @@ class SessionManager:
     # --- reconciler ------------------------------------------------------------------
 
     def reconcile_once(self) -> None:
-        """Make reality match the desired state: every live session runs on a live executor.
+        """Make reality match the desired state.
 
-        That covers first assignment and recovery from a dead executor alike; the manager
-        does not need to know why an executor is gone. Assumes one manager process.
+        1. A session past a deadline is ended (timers run first, so an overdue session is
+           never handed to a new executor).
+        2. Every other live session runs on a live executor. That covers first assignment and
+           recovery from a dead executor alike; the manager does not need to know why an
+           executor is gone.
+        Assumes one manager process.
         """
-        alive_since = self.clock() - self.config.lease_seconds
+        now = self.clock()
+        state_table.expire_waiting(self.conn, now)
+        state_table.stop_overdue_runs(self.conn, now)
+        alive_since = now - self.config.lease_seconds
         for session_id in state_table.sessions_needing_executor(self.conn, alive_since):
             executor_id = state_table.least_loaded_executor(self.conn, alive_since)
             if executor_id is None:

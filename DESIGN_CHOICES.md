@@ -88,11 +88,22 @@ swappable state plumbing) are implemented as specified and are not repeated here
 | 52 | Two test layers: simulated death (exception at the same points; fast, checks the rules and the model input) and a real-process table (9 kill points). | Only one of them. | The first isolates logic; the second proves the whole path with a real SIGKILL, reassignment and replay. |
 | 53 | A zombie that finishes a non-idempotent call after the new executor recorded "unknown" leaves the model with "unknown" although the tool service has the result. | Reconcile later. | Safe (the zombie's own append is fenced); at worst the model is told less than is known. |
 
+## Step 7: timers and caps
+
+| # | Choice | Rejected alternative | Why |
+|---|--------|----------------------|-----|
+| 54 | The manager's reconciler ends sessions past a deadline (`expired`, `stopped`) before it assigns anything. | Separate timer loops. | One loop, one order: an overdue session is never handed to a fresh executor. |
+| 55 | The active-run limit applies to `running` sessions only and is counted from admission (so queueing time counts). A stopped run has its epoch bumped. | Count from first assignment; also stop `created`. | Simple and conservative; a session stuck in `created` is a capacity problem, not a run that works too long. The bump fences an executor that is still mid-iteration (tested). This also closes the step-1 open item for manager-initiated endings. |
+| 56 | The waiting expiry applies to `waiting` sessions only, uses the session's own `wait_timeout` (copied from config at admission) and does not touch executors or the epoch. | One shared deadline. | Decision 4. A waiting session holds no executor, so nothing needs fencing. Tested: a waiting session far past its run limit is left alone. |
+| 57 | Both deadlines are strict: a session exactly at its deadline is still live. | Inclusive. | One consistent rule; boundary tested for both. |
+| 58 | The executor enforces the step cap: when the model asks for a call beyond the cap, it logs `stopped` (reason `step_cap`) instead of the decision, and releases as `stopped`. | Log the decision, then refuse. | A logged tool decision with no result looks like a call in flight to the next executor and would be recovered (run). Not logging it keeps recovery correct. The cap allows exactly `step_cap` calls. |
+| 59 | `step_count` is updated in the same statement as the log entry that makes the call (`counts_as_step`). | A separate update, or derive it only from the log. | The count the manager reads cannot disagree with the log, and it costs no extra write. |
+| 60 | The waiting deadline is set by the executor when it releases the session (`release(..., wait_deadline)`). | The manager sets it later. | The executor is the one that knows the session started waiting, at one atomic transition. |
+
 ## Open items (not yet decided or built)
 
 | Item | Why it matters | Planned in |
 |------|----------------|-----------|
-| A terminal transition must bump the epoch | `append()` checks only the epoch, so the last holder could still write to a session that just ended | Step 7 |
-| A resumed `waiting` session would be released again at once | `advance()` needs a human-response log entry to read first | Step 7 |
-| An unexpected exception kills the whole worker and every session on it | Swallowing it would make a broken session spin silently | Step 7 |
+| The human-response path is not built: nothing moves a `waiting` session back to `running`, so a waiting session can only expire | Not in the build order. If added, `advance()` must read a response before releasing, and the run deadline must restart on resume | Not planned (README gap) |
+| An unexpected exception kills the whole worker and every session on it | Swallowing it would make a broken session spin silently | Not decided |
 | One manager process only | Two managers could assign the same session; needs leader election | Not planned (README gap) |
