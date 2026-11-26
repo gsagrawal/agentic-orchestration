@@ -18,7 +18,7 @@ import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from agent_network_proxy.registry import Caller, Registry
+from agent_network_proxy.registry import Caller, Registry, Superseded
 
 LABEL = "agent-sandbox=1"
 WORKDIR_MARKER = ".agent-sandbox-workdir"   # says "a sandbox controller created this directory, for this session"
@@ -81,6 +81,7 @@ class SandboxController:
         self.image, self.proxy, self.docker = image, proxy, docker
         self._by_session: dict[str, Sandbox] = {}     # keyed by Caller.key (tenant/session)
         self._proxy_name: str | None = None
+        self.inspect_timeout_s = 10      # _exists() runs while the registry lock is held, so a hung daemon must not hang it
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -117,7 +118,10 @@ class SandboxController:
                     "inspect sandbox")
                 if not sandbox.ip:
                     raise SandboxError(f"{name} has no address on its network (did it exit immediately?)")
-                self.proxy.registry.register(sandbox.ip, caller, name)
+                try:
+                    self.proxy.registry.register(sandbox.ip, caller, name, claimed=True)
+                except Superseded as exc:
+                    raise SandboxError(str(exc)) from exc
         except Exception as exc:
             try:
                 self.stop(sandbox)
@@ -193,8 +197,8 @@ class SandboxController:
         gone = attempt(self._wait_until_gone, sandbox.name)
         if sandbox.network and gone:
             attempt(self._remove_network, sandbox.network)
-        if sandbox.caller and self._by_session.get(sandbox.caller.key) is sandbox:
-            del self._by_session[sandbox.caller.key]
+        if not errors and sandbox.caller and self._by_session.get(sandbox.caller.key) is sandbox:
+            del self._by_session[sandbox.caller.key]   # kept after a failed stop: it may still be running, and a fence must see it
         sandbox.stopped = not errors
         if errors:
             raise errors[0]
@@ -309,15 +313,25 @@ class SandboxController:
                         del data["callers"][ip]      # a stale entry for a sandbox that is gone
                 data["epochs"][caller.key] = max(caller.epoch, newest)
                 data["callers"][f"pending:{name}"] = {**asdict(caller), "sandbox": name, "pending": time.time()}
-        for victim in superseded:                    # slow docker work happens outside the lock
-            self.stop(Sandbox(name=victim, workdir=Path("."), limits=Limits(), network=f"agentpoc_{victim}"))
-        if old:
-            self.stop(old)
+        try:
+            for victim in superseded:                # stopping sandboxes is slow, so it happens outside the lock
+                self.stop(Sandbox(name=victim, workdir=Path("."), limits=Limits(), network=f"agentpoc_{victim}"))
+            if old:
+                self.stop(old)
+        except Exception:
+            if self.proxy:
+                with contextlib.suppress(Exception):
+                    self.proxy.registry.unregister(name)     # do not leave a claim that blocks the retry
+            raise
 
     def _exists(self, name: str) -> bool:
         """True/False only when the daemon actually answered. Any other failure (daemon unreachable, ...) is an
         error: "I cannot tell" must never be read as "it is gone"."""
-        done = subprocess.run([self.docker, "inspect", name], capture_output=True, text=True)
+        try:
+            done = subprocess.run([self.docker, "inspect", name], capture_output=True, text=True,
+                                  timeout=self.inspect_timeout_s)
+        except subprocess.TimeoutExpired as exc:
+            raise SandboxError(f"cannot tell whether {name} exists: docker inspect timed out after {self.inspect_timeout_s}s") from exc
         if done.returncode == 0:
             return True
         if "no such" in done.stderr.lower():

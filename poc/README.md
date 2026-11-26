@@ -9,7 +9,7 @@ containers. Design context: [../docs/service-architecture.md](../docs/service-ar
 ```bash
 pip install pytest      # the only host dependency besides Docker and Python 3.10+
 make demo               # scripted agent: pandoc, a credentialed call, a denied call, an escape attempt
-make test               # 93 tests, ~2 min
+make test               # 101 tests, ~2 min
 make bench              # cold start, 50 runs per configuration
 make down               # stop the proxy and stub
 ```
@@ -76,9 +76,9 @@ Not present at all: session-manager, ingress, auth, llm-gateway, object store, r
 | Scrubbing leaves repeated headers and HEAD responses intact | `test_response_scrubbing_keeps_headers_intact` |
 | The leak detector itself works (no vacuous "not found") | `test_the_leak_detector_detects_a_planted_leak` |
 | Registry: no lost updates, no stale reads, a wrongly shaped file is an error | `tests/test_registry.py` |
-| Two controllers cannot both win one session; a failed create says what it left behind | `test_two_controllers_racing_for_one_session_cannot_both_win`, `test_a_create_that_fails_and_cannot_clean_up_says_what_it_left_behind` |
+| Two controllers cannot both win one session, and the loser keeps no sandbox; a failed fence leaves no claim; a failed create says what it left behind | `test_two_controllers_racing_for_one_session_cannot_both_win`, `test_a_controller_that_loses_the_fence_race_does_not_keep_its_sandbox`, `test_a_failed_fence_does_not_leave_its_claim_behind`, `test_a_create_that_fails_and_cannot_clean_up_says_what_it_left_behind` |
 | A work dir belongs to one session; its marker is not followed | `test_a_workdir_belongs_to_one_session_and_its_marker_is_not_followed` |
-| Basic-auth placeholders are swapped; unswappable ones are refused | `test_basic_auth_placeholders_are_swapped_too`, `test_a_placeholder_where_it_cannot_be_swapped_is_refused_not_forwarded` |
+| Basic-auth placeholders are swapped and an echoed Basic header is scrubbed; unswappable ones (path, body, query name) are refused | `test_basic_auth_placeholders_are_swapped_too`, `test_an_echoed_basic_credential_is_scrubbed_too`, `test_a_placeholder_where_it_cannot_be_swapped_is_refused_not_forwarded`, `test_a_placeholder_in_a_query_parameter_name_is_refused` |
 | Ungranted destination denied (and audited) | `test_destination_not_in_grants_is_denied` |
 | Identity from address, not claims | `test_caller_is_identified_by_address_not_by_claims` |
 | Real token in the stub, nowhere in the sandbox | `test_stub_receives_the_real_token_but_the_sandbox_never_sees_it`, `test_real_token_is_nowhere_in_the_sandbox`, `test_proxy_private_key_is_not_in_the_sandbox` |
@@ -108,7 +108,7 @@ difference to start time. These are local-image numbers: no pull, no Kubernetes,
 - Placeholder swap covers header values (including inside HTTP Basic credentials, which is how git sends a token) and query values. A placeholder in the URL path or in a request body cannot be swapped, so such a request is **refused** (`placeholder in an unsupported position`) instead of going out with a fake token. Cookies and other encodings are not handled. Response scrubbing is exact-match only: an encoded or transformed echo of a secret gets through (AUDIT-1).
 - The proxy trusts only the stub's self-signed cert upstream, has one CA for all tenants, and keeps its key on disk (D21, D22).
 - Rate limit is in the memory of one proxy (N replicas would allow N times the limit) and counts requests, not `CONNECT`s, so a sandbox can open tunnels to a granted host without being limited.
-- The state directories are meant for a single-user machine such as a laptop. The registry directory is not world-writable (it is the proxy's trust root), but the audit, stub and proxy-conf directories are, because the containers write them as uid 65534. On a shared host another user could then rewrite the audit log or replace the proxy CA certificate that is mounted into every sandbox; they should be owned by that uid instead.
+- The state directories are meant for a single-user machine such as a laptop. The registry directory is never world-writable (it is the proxy's trust root). The audit, stub and proxy-conf directories are handed to uid 65534 with mode 0750 when `stack.py` runs as root, but **0777 when it runs as a normal user** (chown is not allowed), because the containers write them as uid 65534. In that case, on a shared host, another user could rewrite the audit log or replace the proxy CA certificate that is mounted into every sandbox.
 - The audit log is a local file with no append-only enforcement, retention or tamper evidence; the registry's epoch table is never pruned, and its lock is a single-host `flock`.
 
 **Platform**

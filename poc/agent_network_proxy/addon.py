@@ -104,7 +104,8 @@ class Gatekeeper:
         if flow.request.headers.get("Upgrade") or "upgrade" in flow.request.headers.get("Connection", "").lower():
             return caller, None, "upgrade not permitted"      # WebSocket frames would bypass audit and scrubbing
         placeholder = grant["placeholder"]
-        if placeholder in flow.request.path.split("?")[0] or placeholder.encode() in (flow.request.raw_content or b""):
+        in_query_name = any(placeholder in key for key, _ in flow.request.query.items(multi=True))
+        if in_query_name or placeholder in flow.request.path.split("?")[0] or placeholder.encode() in (flow.request.raw_content or b""):
             return caller, None, "placeholder in an unsupported position"      # fail loudly: it would go out as a fake token
         if count_rate:
             rl = grants["tenants"][caller.tenant]["rate_limit"]
@@ -128,22 +129,30 @@ class Gatekeeper:
         secret = json.loads((CONFIG / "secrets.json").read_text())[caller.tenant][grant["credential"]]
         self._audit(flow, caller, "allow", None, grant["credential"], None)   # before the credential is used
         placeholder, real = grant["placeholder"].encode(), secret.encode()
-        flow.request.headers.fields = tuple((k, swap(v, placeholder, real)) for k, v in flow.request.headers.fields)
+        swapped = [(k, swap(v, placeholder, real)) for k, v in flow.request.headers.fields]
+        echoes = [new for (_, old), (_, new) in zip(flow.request.headers.fields, swapped) if new != old]   # e.g. a Basic blob
+        flow.request.headers.fields = tuple(swapped)
         pairs = flow.request.query.items(multi=True)
         if any(grant["placeholder"] in value for _, value in pairs):      # touch the query only if it carries the placeholder
             flow.request.query = [(k, v.replace(grant["placeholder"], secret)) for k, v in pairs]
-        flow.metadata.update(caller=caller, credential=grant["credential"], secret=secret)
+        flow.metadata.update(caller=caller, credential=grant["credential"], secret=secret, echoes=echoes)
 
     @fail_closed
     def response(self, flow: http.HTTPFlow) -> None:
         secret = flow.metadata.get("secret")
         if secret is None:
             return
-        real = secret.encode()
-        flow.response.headers.fields = tuple((k, v.replace(real, REDACTED)) for k, v in flow.response.headers.fields)
+        # What to remove: the secret itself, and every header value we rewrote (a Basic blob contains the secret
+        # only in base64, which a plain search would miss when the destination echoes the header back).
+        needles = [secret.encode(), *flow.metadata.get("echoes", [])]
+        def scrub(data: bytes) -> bytes:
+            for needle in needles:
+                data = data.replace(needle, REDACTED)
+            return data
+        flow.response.headers.fields = tuple((k, scrub(v)) for k, v in flow.response.headers.fields)
         body = flow.response.get_content(strict=False)
-        if body and real in body:
-            flow.response.set_content(body.replace(real, REDACTED))
+        if body and any(n in body for n in needles):
+            flow.response.set_content(scrub(body))
         self._audit(flow, flow.metadata["caller"], "result", None, flow.metadata["credential"],
                     flow.response.status_code)
 

@@ -102,6 +102,9 @@ class AgentExecutor:
         record = {"ts": time.time(), "session": caller.session, "agent": caller.agent,
                   "tenant": caller.tenant, "epoch": caller.epoch, "step": step,
                   "tool": call.tool, "code": call.code, "result": result}
-        with self.session_log.open("a") as f:
-            f.write(json.dumps(record) + "\n")
+        try:
+            with self.session_log.open("a") as f:
+                f.write(json.dumps(record) + "\n")
+        except OSError as exc:      # a full disk must not discard the results; the record says the log is missing it
+            record["log_error"] = f"{type(exc).__name__}: {exc}"
         return record

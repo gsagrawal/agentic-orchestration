@@ -28,7 +28,7 @@ services:
       - ./.state/registry:/registry:ro     # written by sandbox-controller
       - ./.state/audit:/audit
       - ./.state/stub:/stub:ro             # the stub's public cert, so the proxy verifies its upstream
-      - ./.state/proxy-conf:/conf          # the proxy's CA; the private key never leaves this container
+      - ./.state/proxy-conf:/conf          # the proxy's CA, including its private key: mounted into this container only, but it lives in .state/ on the host
     networks: [upstream]   # sandbox networks are attached to it on demand by sandbox-controller
     depends_on:
       stub: {condition: service_healthy}

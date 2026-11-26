@@ -24,12 +24,20 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 
+class Superseded(Exception):
+    """A sandbox tried to register but a newer executor has taken over its session (or its claim is gone)."""
+
+
 @dataclass(frozen=True)
 class Caller:
     session: str
     agent: str
     tenant: str
     epoch: int
+
+    def __post_init__(self):
+        if "/" in self.tenant:        # `key` joins tenant and session with "/": without this two pairs could share a key
+            raise ValueError(f"tenant id {self.tenant!r} must not contain '/'")
 
     @property
     def key(self) -> str:
@@ -82,8 +90,14 @@ class Registry:
 
     # -- controller side ---------------------------------------------------
 
-    def register(self, ip: str, caller: Caller, sandbox: str) -> None:
+    def register(self, ip: str, caller: Caller, sandbox: str, *, claimed: bool = False) -> None:
+        """Record the sandbox's address. With `claimed`, the sandbox must still hold the claim the controller's
+        fence made for it and its epoch must not have been superseded: a controller that lost a race must not
+        end up with a trusted, running sandbox."""
         def change(data):
+            if claimed and (f"pending:{sandbox}" not in data["callers"]
+                            or caller.epoch < data["epochs"].get(caller.key, 0)):
+                raise Superseded(f"{sandbox} no longer holds session {caller.key} (a newer executor took over)")
             data["callers"] = {k: c for k, c in data["callers"].items() if c["sandbox"] != sandbox}   # drops its pending claim
             data["callers"][ip] = {**asdict(caller), "sandbox": sandbox}
             data["epochs"][caller.key] = max(data["epochs"].get(caller.key, 0), caller.epoch)

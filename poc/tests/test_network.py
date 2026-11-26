@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 import threading
 import time
+import uuid
 
 from conftest import AUDIT_LOG, STATE, STUB_LOG, fetch, lines, py
 from agent_network_proxy.registry import Caller
@@ -294,7 +295,7 @@ def test_a_relative_ca_path_works(proxied, tmp_path):
     ctl, _ = proxied()
     rel = os.path.relpath(ctl.proxy.ca_cert)
     other = SandboxController(proxy=dataclasses.replace(ctl.proxy, ca_cert=Path(rel)))
-    sbx = other.create(tmp_path / "r", Caller("s-rel-ca-" + tmp_path.name[-6:], "agent-a", "tenant-a", 1))
+    sbx = other.create(tmp_path / "r", Caller("s-rel-ca-" + uuid.uuid4().hex[:8], "agent-a", "tenant-a", 1))
     other.stop(sbx)
 
 
@@ -388,11 +389,11 @@ def test_stop_survives_a_broken_docker_client(proxied):
         with pytest.raises(OSError):
             ctl.stop(sbx)
         assert not sbx.stopped
-        assert sbx.caller.key not in ctl._by_session              # in-memory state is cleaned regardless
+        assert ctl._by_session[sbx.caller.key] is sbx             # still remembered: it may be running, so a fence must see it
     finally:
         ctl.docker = real
         ctl.stop(sbx)                                                # and a retry then succeeds
-    assert sbx.stopped
+    assert sbx.stopped and sbx.caller.key not in ctl._by_session
 
 
 def test_an_unreachable_daemon_is_not_mistaken_for_a_stopped_sandbox(proxied, tmp_path):
@@ -453,7 +454,7 @@ def test_two_controllers_racing_for_one_session_cannot_both_win(proxied, tmp_pat
     import threading
     from sandbox_controller import SandboxController, SandboxError
     ctl, _ = proxied()
-    caller = Caller("race-" + tmp_path.name[-8:], "agent-a", "tenant-a", 2)
+    caller = Caller("race-" + uuid.uuid4().hex[:8], "agent-a", "tenant-a", 2)
     gate, outcomes = threading.Barrier(2), []
     def contend(i):
         c = SandboxController(proxy=ctl.proxy)        # two controllers that know nothing of each other
@@ -482,7 +483,7 @@ def test_a_create_that_fails_and_cannot_clean_up_says_what_it_left_behind(proxie
     monkeypatch.setattr(ctl.proxy.registry, "register", no_register)
     monkeypatch.setattr(ctl, "_remove_network", lambda n: (_ for _ in ()).throw(OSError("daemon busy")))
     with pytest.raises(SandboxError, match=r"sbx-\w+.*reap") as err:
-        ctl.create(tmp_path / "orphan", Caller("s-orphan-" + tmp_path.name[-6:], "agent-a", "tenant-a", 1))
+        ctl.create(tmp_path / "orphan", Caller("s-orphan-" + uuid.uuid4().hex[:8], "agent-a", "tenant-a", 1))
     assert "registry unwritable" in str(err.value) and "daemon busy" in str(err.value)
     monkeypatch.undo()
     ctl.reap()                                           # and reap() really does clean it up
@@ -491,7 +492,7 @@ def test_a_create_that_fails_and_cannot_clean_up_says_what_it_left_behind(proxie
 def test_the_same_epoch_can_be_retried_after_its_sandbox_expired(tmp_path):
     from sandbox_controller import Limits, SandboxController
     ctl = SandboxController()                            # no proxy: only the in-memory map knows the old sandbox
-    caller = Caller("expire-" + tmp_path.name[-6:], "agent-no-net", "tenant-a", 1)
+    caller = Caller("expire-" + uuid.uuid4().hex[:8], "agent-no-net", "tenant-a", 1)
     ctl.create(tmp_path / "w", caller, Limits(deadline_s=1))
     time.sleep(3)                                        # it exited at its deadline, but nobody called stop()
     second = ctl.create(tmp_path / "w", caller)
@@ -540,3 +541,90 @@ def test_a_placeholder_where_it_cannot_be_swapped_is_refused_not_forwarded(proxi
     assert "HTTPError 403" in in_path and "HTTPError 403" in in_body
     assert len(lines(STUB_LOG)) == before
     assert lines(AUDIT_LOG)[-1]["reason"] == "placeholder in an unsupported position"
+
+
+def test_a_controller_that_loses_the_fence_race_does_not_keep_its_sandbox(proxied, tmp_path):
+    import pytest
+    from sandbox_controller import SandboxController, SandboxError
+    ctl, _ = proxied()
+    x, y = SandboxController(proxy=ctl.proxy), SandboxController(proxy=ctl.proxy)
+    session = "lose-" + uuid.uuid4().hex[:8]
+    older, newer = Caller(session, "agent-a", "tenant-a", 1), Caller(session, "agent-a", "tenant-a", 2)
+    won, real = {}, x._docker
+    def intercept(args, what):
+        out = real(args, what)
+        if what == "inspect sandbox":                     # x's container is running but not yet registered
+            won["y"] = y.create(tmp_path / "y", newer)    # a newer executor takes over right now
+        return out
+    x._docker = intercept
+    try:
+        with pytest.raises(SandboxError) as err:
+            x.create(tmp_path / "x", older)
+        assert "took over" in str(err.value), err.value          # lost the race, not some unrelated failure
+        live = [name for name, _ in proxied.registry.sandboxes(newer.key)]
+        assert live == [won["y"].name]                    # exactly one sandbox holds the session: the newer one
+        docker_names = subprocess.run(["docker", "ps", "--filter", "label=agent-sandbox=1", "--format", "{{.Names}}"],
+                                      capture_output=True, text=True).stdout.split()
+        assert won["y"].name in docker_names and len([n for n in docker_names if n.startswith("sbx-")]) == 2   # y's and the fixture's
+    finally:
+        if "y" in won:
+            y.stop(won["y"])
+
+
+def test_a_failed_fence_does_not_leave_its_claim_behind(proxied, tmp_path, monkeypatch):
+    import pytest
+    from sandbox_controller import SandboxController
+    ctl, old = proxied(session="claim", epoch=1)
+    fresh = SandboxController(proxy=ctl.proxy)
+    caller = Caller(old.caller.session, "agent-a", "tenant-a", 2)
+    real_stop = fresh.stop
+    monkeypatch.setattr(fresh, "stop", lambda sandbox: (_ for _ in ()).throw(OSError("daemon hiccup")))
+    with pytest.raises(OSError):
+        fresh.create(tmp_path / "c1", caller)
+    assert not any(n.startswith("sbx-") and e == 2 for n, e in proxied.registry.sandboxes(caller.key))    # no claim left
+    monkeypatch.setattr(fresh, "stop", real_stop)
+    again = fresh.create(tmp_path / "c2", caller)          # the same epoch can retry at once, not after a 60 s expiry
+    fresh.stop(again)
+
+
+def test_an_echoed_basic_credential_is_scrubbed_too(proxied):
+    import base64
+    ctl, sbx = proxied()
+    basic = base64.b64encode(b"x-access-token:placeholder-github-token").decode()
+    out = py(ctl, sbx, "import urllib.request as u\n"
+                       f"r = u.urlopen(u.Request('https://api.github.test/headers', headers={{'Authorization': 'Basic {basic}'}}), timeout=8)\n"
+                       "print(r.headers.get('X-Echo')); print(r.read())").stdout
+    leaked = base64.b64encode(f"x-access-token:{SECRET}".encode()).decode()
+    assert leaked not in out and "[REDACTED]" in out
+
+
+def test_a_placeholder_in_a_query_parameter_name_is_refused(proxied):
+    ctl, sbx = proxied()
+    before = len(lines(STUB_LOG))
+    assert "HTTPError 403" in fetch(ctl, sbx, GITHUB + "?placeholder-github-token=1").stdout
+    assert len(lines(STUB_LOG)) == before
+
+
+def test_a_hung_docker_inspect_is_an_error_not_a_hang(proxied, tmp_path):
+    import pytest
+    from sandbox_controller import SandboxError
+    ctl, sbx = proxied()
+    slow = tmp_path / "docker"
+    slow.write_text("#!/bin/sh\nsleep 30\n")
+    slow.chmod(0o755)
+    real = ctl.docker
+    ctl.docker, ctl.inspect_timeout_s = str(slow), 1
+    started = time.monotonic()
+    try:
+        with pytest.raises(SandboxError, match="cannot tell"):
+            ctl._exists(sbx.name)            # runs while the registry lock is held, so it must be bounded
+        assert time.monotonic() - started < 5
+    finally:
+        ctl.docker = real
+
+
+def test_tenant_ids_cannot_collide_through_a_slash():
+    import pytest
+    assert Caller("c", "a", "a", 1).key != Caller("b/c", "a", "a", 1).key
+    with pytest.raises(ValueError, match="tenant"):
+        Caller("c", "agent", "a/b", 1)

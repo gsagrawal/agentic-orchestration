@@ -175,3 +175,10 @@ def test_a_corrupt_registry_is_a_step_error_not_a_crash(proxied, tmp_path):
     finally:
         path.write_text(good)
     assert "error" in results[0]["result"]
+
+
+def test_a_failing_session_log_does_not_lose_the_results(proxied, tmp_path):
+    ctl, _ = proxied()
+    ex = AgentExecutor(ctl, GRANTS, tmp_path / "no-such-dir" / "log.jsonl")         # cannot be written
+    results = ex.run(Caller(f"s-lg-{uuid.uuid4().hex[:8]}", "agent-a", "tenant-a", 1), [ToolCall("bash", "echo ok")], tmp_path / "wd")
+    assert results[0]["result"]["stdout"] == "ok\n" and "log_error" in results[0]

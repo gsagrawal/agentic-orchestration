@@ -46,3 +46,22 @@ def test_a_wrongly_shaped_registry_is_an_error_not_a_crash(tmp_path):
         reg.path.write_text(bad)
         with pytest.raises(RegistryError):
             reg.newest_epoch("t/s")
+
+
+def test_registering_a_claim_that_was_superseded_is_refused(tmp_path):
+    import pytest
+    from agent_network_proxy.registry import Superseded
+    reg = Registry(tmp_path / "registry.json")
+    caller = Caller("s", "a", "t", 1)
+    with reg.transaction() as data:                                  # the claim, as the controller's fence writes it
+        data["callers"]["pending:sbx1"] = {"session": "s", "agent": "a", "tenant": "t", "epoch": 1, "sandbox": "sbx1", "pending": 1e12}
+        data["epochs"][caller.key] = 1
+    reg.register("10.0.0.1", caller, "sbx1", claimed=True)           # claim intact: fine
+    with reg.transaction() as data:
+        data["callers"]["pending:sbx2"] = {"session": "s", "agent": "a", "tenant": "t", "epoch": 1, "sandbox": "sbx2", "pending": 1e12}
+        data["epochs"][caller.key] = 2                               # a newer executor has fenced it
+    with pytest.raises(Superseded):
+        reg.register("10.0.0.2", caller, "sbx2", claimed=True)
+    reg.unregister("sbx2")
+    with pytest.raises(Superseded):                                  # and a claim that is simply gone
+        reg.register("10.0.0.3", Caller("s", "a", "t", 2), "sbx3", claimed=True)
