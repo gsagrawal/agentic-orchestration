@@ -3,7 +3,8 @@
     {"<agent_id>": {"<version>": {"script": [...], "loop": false}}}
 
 A session is pinned to one (agent_id, version) at admission, so editing the file
-for a later version never changes a running session.
+for a later version never changes a running session. The file is read once, when the
+store is created, so a restart is needed to see new agents.
 """
 
 import json

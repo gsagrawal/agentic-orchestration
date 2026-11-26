@@ -1,11 +1,13 @@
 # Design choices
 
-Choices made while building, with the alternative rejected. The seven decisions
-given in the brief (epoch fencing, at-least-once tools with idempotency keys,
-"outcome unknown", two timers, step cap and quotas, read-only budget status,
-swappable state plumbing) are implemented as specified and are not repeated here.
+Choices made while building, each with the alternative rejected. Numbers are stable and
+sections are by topic, so a few early entries are marked superseded rather than deleted.
 
-## Step 1: state and log
+The seven decisions given in the brief (epoch fencing, at-least-once tools with idempotency
+keys, "outcome unknown", two timers, step cap and quotas, read-only budget status, swappable
+state plumbing) are implemented as specified and are not repeated here.
+
+## State and log
 
 | # | Choice | Rejected alternative | Why |
 |---|--------|----------------------|-----|
@@ -19,10 +21,10 @@ swappable state plumbing) are implemented as specified and are not repeated here
 | 8 | States: `created, running, waiting, done, cancelled, expired, stopped`, enforced by a CHECK constraint. `stopped` means cut off by the step cap or active-run limit. | The architecture doc's `admitted`/`resumed`. | `admitted` and `created` are the same moment in this MVP, and `resumed` is just `running` with a higher epoch. Fewer states, fewer transitions to test. |
 | 9 | Separate `run_deadline` and `wait_deadline` columns. | One `deadline`. | Decision 4 requires two different timers; one column would conflate them. |
 | 10 | One SQLite file for state table and log, one connection per process, WAL, `busy_timeout` 10 s, autocommit with explicit `BEGIN IMMEDIATE`. | Python's implicit transactions; separate files for log and state. | Implicit transactions start deferred and make read-then-write racy. One file keeps the epoch check and the insert atomic (two files could not). |
-| 11 | `assign()` refuses terminal sessions (`SessionClosed`). | Let the caller check the state first. | A check outside the transaction races; found in self-review of step 1. |
+| 11 | `assign()` refuses terminal sessions (`SessionClosed`). | Let the caller check the state first. | A check outside the transaction races. |
 | 12 | `synchronous=NORMAL`. | `FULL`. | Safe against `kill -9` (what the tests do) but may lose the last commits on OS crash or power loss. Chosen for speed; a real deployment would not accept this. |
 
-## Step 2: tool service stub
+## Tool service stub
 
 | # | Choice | Rejected alternative | Why |
 |---|--------|----------------------|-----|
@@ -30,12 +32,12 @@ swappable state plumbing) are implemented as specified and are not repeated here
 | 14 | The stub is stronger than a real proxy: effect, result and epoch check commit atomically. Labelled as faked in `tool_service.py`. | Pretend the real proxy can do this. | It cannot for an external API. Only the idempotency key protects a request that was already forwarded. |
 | 15 | "Idempotent" means the backend dedupes on the key: effect and stored result commit together. A non-idempotent tool commits the effect first and records the result in a second step, so there is a window (effect, no result). | Same atomic commit for every tool. | Without the window, "non-idempotent tool with no recorded result" (decision 3) could never occur for real, and step 6 could not be tested honestly. |
 | 16 | The result of a non-idempotent call is stored even if the epoch changed during the window. | Reject it as stale. | The effect already happened; recording it is the truth. The zombie's log append is still fenced. |
-| 17 | No "started" intent record. `call()` on a non-idempotent tool with no stored result runs it again; the executor must decide not to call (step 6). | Service refuses to rerun a non-idempotent key that has no result. | Keeps to the brief: the "outcome unknown" rule lives in the executor. Cost: the service alone is not safe for non-idempotent retries (documented in the module docstring). |
+| 17 | No "started" intent record. `call()` on a non-idempotent tool with no stored result runs it again; the executor must decide not to call (see #48). | Service refuses to rerun a non-idempotent key that has no result. | Keeps to the brief: the "outcome unknown" rule lives in the executor. Cost: the service alone is not safe for non-idempotent retries (documented in the module docstring). |
 | 18 | A key reused with a different tool or args raises `KeyConflict`. | Silently return the stored result. | The step number is replayed deterministically from the log, so a mismatch means a bug; failing loudly beats returning a wrong result. |
 | 19 | The effects ledger has no unique constraint and is append-only (triggers). | Unique on (session, step). | A unique constraint would reject the second effect instead of recording it, hiding exactly what the tests must detect. |
 | 20 | `fault_hook(point)` with points `before_effect` / `after_effect`. | Sleep-and-hope timing in tests. | Deterministic: tests (and later real `kill -9`) land at exactly the window being tested. |
 
-## Step 3: executor
+## Executor
 
 | # | Choice | Rejected alternative | Why |
 |---|--------|----------------------|-----|
@@ -47,11 +49,11 @@ swappable state plumbing) are implemented as specified and are not repeated here
 | 26 | Step number = count of tool calls in the log (1-based). Idempotency key = `<session>:<step>`. | A separate counter. | Derived from the log, so it cannot disagree with it. |
 | 27 | `finish`/`wait` are logged, then the session is released in the same iteration; if the executor dies between, the next one sees the last action and releases. | Release first. | Log first means the log never lags the state table. |
 | 28 | `release()` is fenced by epoch and by `state='running'`; the executor catches `StaleEpoch`, forgets the session and carries on. | Crash the worker on a fencing error. | Being fenced is normal after reassignment, not a failure. |
-| 29 | Resume with a tool call in flight raises `NotImplementedError` until step 6. | Retry the call (unsafe for non-idempotent tools). | Fail closed. Labelled as a placeholder in code and tests; step 6 replaces it. |
+| 29 | **Superseded by #48.** Resuming with a call in flight first failed closed (`NotImplementedError`) rather than guess. | Retry the call (unsafe for non-idempotent tools). | It was a placeholder until the recovery rules existed. |
 | 30 | `agent_id`/`agent_version` columns pin the definition at admission; the agent store is a JSON file. | Look up "latest" on each pickup. | Pinning is required by the architecture: edits must not change running sessions. |
 | 31 | Workers are `multiprocessing` "spawn" processes. | "fork". | A forked child would inherit the parent's open SQLite connections. |
 
-## Step 4: session manager
+## Session manager: admission and assignment
 
 | # | Choice | Rejected alternative | Why |
 |---|--------|----------------------|-----|
@@ -63,9 +65,9 @@ swappable state plumbing) are implemented as specified and are not repeated here
 | 37 | Executors register themselves in an `executors` table; the manager assigns to the least-loaded one (fewest running sessions, ties by id). | Round robin; static executor list. | Least-loaded needs no extra state and spreads evenly after a failure moves sessions. No capacity limit per executor yet. |
 | 38 | With no executor registered, sessions stay `created` and the reconciler retries. | Reject admission. | Admission is about the tenant's limits; capacity is the scheduler's problem. |
 | 39 | The pinned version is the agent's highest version at admission. | Caller chooses the version. | Matches the architecture ("pins the Session to the Agent's current version"). |
-| 40 | `reconcile_once()` is the single place that assigns; step 5 extends it to dead executors. Assumes one manager process (no leader election). | Assign inside `start_session`. | One code path for first assignment and for recovery, so it is tested once. |
+| 40 | `reconcile_once()` is the single place that assigns, for first assignment and for dead executors alike (#44). Assumes one manager process (no leader election). | Assign inside `start_session`. | One code path for first assignment and for recovery, so it is tested once. |
 
-## Step 5: liveness and reconciler
+## Liveness and the reconciler
 
 | # | Choice | Rejected alternative | Why |
 |---|--------|----------------------|-----|
@@ -77,7 +79,7 @@ swappable state plumbing) are implemented as specified and are not repeated here
 | 46 | Manager and executors compare timestamps from the same `time.time()`. | A logical clock or database-side time. | Fine on one machine; clock skew is a README gap. |
 | 47 | `register_executor` became `heartbeat`: the first call registers. | Separate register and heartbeat. | They are the same upsert. |
 
-## Step 6: a tool call in flight when the executor dies
+## A tool call in flight when the executor dies
 
 | # | Choice | Rejected alternative | Why |
 |---|--------|----------------------|-----|
@@ -88,7 +90,7 @@ swappable state plumbing) are implemented as specified and are not repeated here
 | 52 | Two test layers: simulated death (exception at the same points; fast, checks the rules and the model input) and a real-process table (9 kill points). | Only one of them. | The first isolates logic; the second proves the whole path with a real SIGKILL, reassignment and replay. |
 | 53 | A zombie that finishes a non-idempotent call after the new executor recorded "unknown" leaves the model with "unknown" although the tool service has the result. | Reconcile later. | Safe (the zombie's own append is fenced); at worst the model is told less than is known. |
 
-## Step 7: timers and caps
+## Timers and caps
 
 | # | Choice | Rejected alternative | Why |
 |---|--------|----------------------|-----|
@@ -101,7 +103,7 @@ swappable state plumbing) are implemented as specified and are not repeated here
 | 60 | A `stop_reason` column (`step_cap` or `run_limit`) is set by both stop paths. | Reason only in the log. | The manager cannot write the log, so the run-limit stop would leave no reason; status must say why. |
 | 61 | The waiting deadline is set by the executor when it releases the session (`release(..., wait_deadline)`). | The manager sets it later. | The executor is the one that knows the session started waiting, at one atomic transition. |
 
-## Step 8: chaos, invariants, harness, measurements
+## Testing and measurement: chaos, invariants, harness
 
 | # | Choice | Rejected alternative | Why |
 |---|--------|----------------------|-----|

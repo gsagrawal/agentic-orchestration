@@ -1,5 +1,6 @@
 """Executor: replay from the log, scripted model, tool calls with (session, step, epoch)."""
 
+import json
 import time
 
 import pytest
@@ -117,10 +118,38 @@ def test_tick_drops_a_session_that_moved_away_and_does_not_crash(conn, db_path, 
     assert ex.runs == {}
 
 
-def test_session_is_pinned_to_its_agent_version(conn, db_path, agents_path):
+def test_executor_that_died_after_logging_finish_is_released_without_asking_the_model(conn, db_path, agents_path):
     sid = new_session(conn, "two-tools")
-    row = state_table.get_session(conn, sid)
-    assert (row["agent_id"], row["agent_version"]) == ("two-tools", 1)
+    e1 = state_table.assign(conn, sid, "ex-1")
+    for kind, payload in [
+        ("model", {"action": {"do": "tool", "tool": "lookup", "args": {"key": "a"}}}),
+        ("tool_result", {"step": 1, "result": {"value": "value-of-a"}}),
+        ("model", {"action": {"do": "finish"}}),  # logged; then ex-1 died before release()
+    ]:
+        session_log.append(conn, sid, e1, kind, payload)
+    state_table.assign(conn, sid, "ex-2")
+
+    class NoModelCalls(ScriptedModel):
+        def decide(self, agent, messages):
+            raise AssertionError("the model must not be asked again")
+
+    run_to_end(Executor(db_path, agents_path, "ex-2", model=NoModelCalls()))
+    assert state_table.get_session(conn, sid)["state"] == "done"
+    assert len(session_log.read(conn, sid)) == 3
+
+
+def test_a_running_session_keeps_the_agent_version_it_was_admitted_with(conn, db_path, tmp_path):
+    """Version 2 of the agent exists (it makes a tool call); the session is pinned to version 1,
+    which just finishes. The executor must follow version 1."""
+    agents = {"a": {"1": {"script": [{"do": "finish"}]},
+                    "2": {"script": [{"do": "tool", "tool": "send_email", "args": {"to": "x"}}, {"do": "finish"}]}}}
+    path = tmp_path / "versions.json"
+    path.write_text(json.dumps(agents))
+    state_table.create_session(conn, "s1", "t", step_cap=5, agent_id="a", agent_version=1)
+    state_table.assign(conn, "s1", "ex-1")
+    run_to_end(Executor(db_path, str(path), "ex-1"))
+    assert state_table.get_session(conn, "s1")["state"] == "done"
+    assert effect_counts(conn) == {}  # version 2's email was never sent
 
 
 def test_worker_process_runs_assigned_sessions_to_completion(conn, db_path, agents_path):
