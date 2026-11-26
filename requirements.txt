@@ -1,0 +1,6 @@
+temporalio>=1.37
+fastapi
+httpx
+pytest
+pytest-asyncio
+uvicorn

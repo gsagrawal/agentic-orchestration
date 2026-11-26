@@ -2,7 +2,6 @@
 import uuid
 
 import pytest
-from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer, Worker
 
 from agent_runtime.activities import Activities
@@ -19,13 +18,6 @@ def tool(name, **args):
 
 def agent(script, grants=("read", "write", "code", "email"), step_cap=20, loop=False):
     return AgentVersion("a", 1, list(FakeTools.SPECS.values()), list(grants), step_cap, script, loop)
-
-
-@pytest.fixture(scope="session")
-async def env():
-    e = await WorkflowEnvironment.start_time_skipping()
-    yield e
-    await e.shutdown()
 
 
 @pytest.fixture

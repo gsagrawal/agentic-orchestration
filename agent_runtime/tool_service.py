@@ -18,9 +18,9 @@ and BEGIN IMMEDIATE so the check-and-write steps are atomic across processes.
 """
 import json
 import sqlite3
-from contextlib import contextmanager
 from dataclasses import dataclass
 
+from agent_runtime.db import txn
 from agent_runtime.tools import FakeTools, ToolSpec
 
 SCHEMA = """
@@ -59,41 +59,24 @@ class EffectsLedger:
         self._path = path
 
     def record(self, key: str, attempt: int, tool: str) -> None:
-        with _txn(self._path) as c:
+        with txn(self._path) as c:
             c.execute("INSERT INTO effects (key, attempt, tool) VALUES (?, ?, ?)", (key, attempt, tool))
 
     def record_once(self, key: str, attempt: int, tool: str) -> None:
         """Idempotent backend: a second effect for the same key is a no-op."""
-        with _txn(self._path) as c:
+        with txn(self._path) as c:
             if c.execute("SELECT 1 FROM effects WHERE key = ?", (key,)).fetchone() is None:
                 c.execute("INSERT INTO effects (key, attempt, tool) VALUES (?, ?, ?)", (key, attempt, tool))
 
     def count(self, key: str) -> int:
-        with _txn(self._path) as c:
+        with txn(self._path) as c:
             return c.execute("SELECT COUNT(*) FROM effects WHERE key = ?", (key,)).fetchone()[0]
 
     def duplicates(self) -> list[str]:
         """Keys with more than one effect. The chaos invariant is that this is empty."""
-        with _txn(self._path) as c:
+        with txn(self._path) as c:
             rows = c.execute("SELECT key FROM effects GROUP BY key HAVING COUNT(*) > 1").fetchall()
         return [r[0] for r in rows]
-
-
-@contextmanager
-def _txn(path: str):
-    # isolation_level=None: we issue BEGIN IMMEDIATE ourselves, so the write lock is
-    # taken up front and two processes cannot both pass a check and then both write.
-    conn = sqlite3.connect(path, timeout=30, isolation_level=None)
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        yield conn
-        conn.execute("COMMIT")
-    except BaseException:
-        if conn.in_transaction:
-            conn.execute("ROLLBACK")
-        raise
-    finally:
-        conn.close()
 
 
 class ToolService:
@@ -111,7 +94,7 @@ class ToolService:
         spec = self._specs[tool]
 
         # Transaction 1: fence, then decide, then write the started marker.
-        with _txn(self._path) as c:
+        with txn(self._path) as c:
             row = c.execute("SELECT highest_attempt, started, result FROM calls WHERE key = ?", (key,)).fetchone()
             if row is None:
                 c.execute("INSERT INTO calls (key, highest_attempt, started) VALUES (?, ?, 1)", (key, attempt))
@@ -130,7 +113,7 @@ class ToolService:
         value = self._tools.run(self.ledger, spec, key, attempt, args)
 
         # Transaction 2: record the result, unless a newer attempt has taken over.
-        with _txn(self._path) as c:
+        with txn(self._path) as c:
             highest = c.execute("SELECT highest_attempt FROM calls WHERE key = ?", (key,)).fetchone()[0]
             if attempt < highest:
                 raise StaleAttempt(f"{key}: attempt {attempt} < highest seen {highest} (result not recorded)")
@@ -139,7 +122,7 @@ class ToolService:
 
     def state(self, key: str) -> str:
         """'none' (no marker), 'started' (marker, no result) or 'done' (result stored)."""
-        with _txn(self._path) as c:
+        with txn(self._path) as c:
             row = c.execute("SELECT started, result FROM calls WHERE key = ?", (key,)).fetchone()
         if row is None:
             return "none"
