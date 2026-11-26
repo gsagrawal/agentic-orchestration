@@ -17,13 +17,14 @@ from temporalio.common import RetryPolicy
 with workflow.unsafe.imports_passed_through():
     from agent_runtime.activities import Activities
     from agent_runtime.models import (
-        HumanRequest, MessageSignal, ModelRequest, ReplySignal, SessionInput, SessionResult, ToolCall,
+        HEARTBEAT_TIMEOUT_S, HumanRequest, MessageSignal, ModelRequest, ReplySignal, SessionInput, SessionResult, ToolCall,
     )
 
 # Retries are unbounded by design (tool calls are at-least-once); only the backoff is capped.
 RETRY = RetryPolicy(initial_interval=timedelta(seconds=1), maximum_interval=timedelta(seconds=10))
 MODEL_TIMEOUT = timedelta(seconds=60)
 SHORT_TIMEOUT = timedelta(seconds=30)
+SANDBOX_RECREATED = "The sandbox was recreated. Files created in earlier steps are gone."
 
 
 @workflow.defn(name="AgentSession")
@@ -66,6 +67,7 @@ class AgentSession:
         specs = {t.name: t for t in agent.tools}
         history: list[dict] = [{"role": "user", "content": inp.message}]
         sandbox_used = False
+        sandbox_created_before = False
         step = 0
         status = "finished"
         try:
@@ -105,15 +107,19 @@ class AgentSession:
                     history.append({"role": "tool", "step": step, "tool": action["tool"], "status": "denied"})
                 else:
                     if spec.type == "code":
-                        await workflow.execute_activity_method(
+                        created = await workflow.execute_activity_method(
                             Activities.ensure_sandbox, inp.session_id,
                             start_to_close_timeout=SHORT_TIMEOUT, retry_policy=RETRY,
                         )
-                        sandbox_used = True
+                        if created and sandbox_created_before:
+                            # We had one and it is gone: tell the model, so it does not assume its files exist.
+                            history.append({"role": "system", "step": step, "content": SANDBOX_RECREATED})
+                        sandbox_used = sandbox_created_before = True
                     result = await workflow.execute_activity_method(
                         Activities.run_tool,
                         ToolCall(inp.session_id, step, spec.name, action.get("args", {})),
                         start_to_close_timeout=timedelta(seconds=spec.timeout_s),
+                        heartbeat_timeout=timedelta(seconds=HEARTBEAT_TIMEOUT_S),
                         retry_policy=RETRY,
                     )
                     history.append({"role": "tool", "step": step, "tool": spec.name, **result})

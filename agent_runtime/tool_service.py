@@ -18,9 +18,11 @@ and BEGIN IMMEDIATE so the check-and-write steps are atomic across processes.
 """
 import json
 import sqlite3
+import time
 from dataclasses import dataclass
 
 from agent_runtime.db import txn
+from agent_runtime.fault import maybe_fault
 from agent_runtime.tools import FakeTools, ToolSpec
 
 SCHEMA = """
@@ -30,6 +32,8 @@ CREATE TABLE IF NOT EXISTS calls (
     started         INTEGER NOT NULL DEFAULT 0,   -- the "started" marker
     result          TEXT                          -- JSON; NULL until recorded
 );
+CREATE TABLE IF NOT EXISTS attempts (id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT, attempt INTEGER, at REAL);
+CREATE TABLE IF NOT EXISTS fenced (id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT, attempt INTEGER);
 CREATE TABLE IF NOT EXISTS effects (              -- the ledger; append-only
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
     key     TEXT NOT NULL,
@@ -93,33 +97,68 @@ class ToolService:
 
     def execute(self, key: str, attempt: int, tool: str, args: dict) -> ToolResult:
         spec = self._specs[tool]
+        maybe_fault("before_marker")
 
         # Transaction 1: fence, then decide, then write the started marker.
-        with txn(self._path) as c:
-            row = c.execute("SELECT highest_attempt, started, result FROM calls WHERE key = ?", (key,)).fetchone()
-            if row is None:
-                c.execute("INSERT INTO calls (key, highest_attempt, started) VALUES (?, ?, 1)", (key, attempt))
-            else:
-                highest, started, result = row
-                if attempt < highest:
-                    raise StaleAttempt(f"{key}: attempt {attempt} < highest seen {highest}")
-                c.execute("UPDATE calls SET highest_attempt = ? WHERE key = ?", (attempt, key))
-                if result is not None:
-                    return ToolResult(OK, json.loads(result))
-                if started and not spec.idempotent:
-                    return ToolResult(OUTCOME_UNKNOWN)
-                # started marker + idempotent tool: fall through and run again.
+        decision, stored = self._begin(key, attempt, spec)
+        if decision == "stale":
+            self._reject(key, attempt, "at start")
+        if decision == "done":
+            return ToolResult(OK, stored)
+        if decision == "unknown":
+            return ToolResult(OUTCOME_UNKNOWN)
 
         # Run outside any transaction: it can be slow, and a kill can land here.
+        maybe_fault("before_effect")
         value = self._tools.run(self.ledger, spec, key, attempt, args)
+        maybe_fault("after_effect")
 
         # Transaction 2: record the result, unless a newer attempt has taken over.
         with txn(self._path) as c:
             highest = c.execute("SELECT highest_attempt FROM calls WHERE key = ?", (key,)).fetchone()[0]
-            if attempt < highest:
-                raise StaleAttempt(f"{key}: attempt {attempt} < highest seen {highest} (result not recorded)")
-            c.execute("UPDATE calls SET result = ? WHERE key = ?", (json.dumps(value), key))
+            stale = attempt < highest
+            if not stale:
+                c.execute("UPDATE calls SET result = ? WHERE key = ?", (json.dumps(value), key))
+        if stale:
+            self._reject(key, attempt, "when recording the result")
+        maybe_fault("after_result")
         return ToolResult(OK, value)
+
+    def _begin(self, key: str, attempt: int, spec: ToolSpec) -> tuple[str, dict | None]:
+        """Returns ('run'|'done'|'unknown'|'stale', stored_result)."""
+        with txn(self._path) as c:
+            row = c.execute("SELECT highest_attempt, started, result FROM calls WHERE key = ?", (key,)).fetchone()
+            if row is None:
+                c.execute("INSERT INTO calls (key, highest_attempt, started) VALUES (?, ?, 1)", (key, attempt))
+                decision, stored = "run", None
+            else:
+                highest, started, result = row
+                if attempt < highest:
+                    return "stale", None
+                c.execute("UPDATE calls SET highest_attempt = ? WHERE key = ?", (attempt, key))
+                if result is not None:
+                    decision, stored = "done", json.loads(result)
+                elif started and not spec.idempotent:
+                    decision, stored = "unknown", None
+                else:
+                    decision, stored = "run", None  # marker + idempotent tool: run again
+            c.execute("INSERT INTO attempts (key, attempt, at) VALUES (?, ?, ?)", (key, attempt, time.time()))
+        return decision, stored
+
+    def _reject(self, key: str, attempt: int, where: str):
+        with txn(self._path) as c:  # separate transaction: the rejection itself must be recorded
+            c.execute("INSERT INTO fenced (key, attempt) VALUES (?, ?)", (key, attempt))
+        raise StaleAttempt(f"{key}: attempt {attempt} is lower than one already seen ({where})")
+
+    def fenced(self) -> list[tuple[str, int]]:
+        """Calls that were rejected as stale. Lets a test show a zombie really hit the fence."""
+        with txn(self._path) as c:
+            return [(r[0], r[1]) for r in c.execute("SELECT key, attempt FROM fenced ORDER BY id")]
+
+    def attempts(self, key: str) -> list[tuple[int, float]]:
+        """(attempt, wall-clock time) for every call that passed the fence; used to time recovery."""
+        with txn(self._path) as c:
+            return [(r[0], r[1]) for r in c.execute("SELECT attempt, at FROM attempts WHERE key = ? ORDER BY id", (key,))]
 
     def state(self, key: str) -> str:
         """'none' (no marker), 'started' (marker, no result) or 'done' (result stored)."""

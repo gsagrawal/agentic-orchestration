@@ -8,7 +8,7 @@ import asyncio
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from agent_runtime.models import HumanRequest, ModelRequest, ToolCall
+from agent_runtime.models import HEARTBEAT_INTERVAL_S, HumanRequest, ModelRequest, ToolCall
 from agent_runtime.notifier import FakeNotifier
 from agent_runtime.sandbox import FakeSandboxController
 from agent_runtime.scripted_model import ScriptedModel
@@ -47,8 +47,15 @@ class Activities:
         key = f"{call.session_id}:{call.step}"
         attempt = activity.info().attempt
         try:
-            # The tool service is blocking (SQLite, sleep): keep it off the event loop.
-            result = await asyncio.to_thread(self._tools.execute, key, attempt, call.tool, call.args)
+            # The tool service is blocking (SQLite, sleep): keep it off the event loop, and
+            # heartbeat from the loop while it runs so Temporal can tell this worker is alive.
+            running = asyncio.ensure_future(asyncio.to_thread(self._tools.execute, key, attempt, call.tool, call.args))
+            while True:
+                done, _ = await asyncio.wait({running}, timeout=HEARTBEAT_INTERVAL_S)
+                if done:
+                    result = running.result()
+                    break
+                activity.heartbeat()
         except StaleAttempt as e:
             # A newer attempt owns this key. Retrying this one can never help.
             raise ApplicationError(str(e), type="StaleAttempt", non_retryable=True)

@@ -32,6 +32,11 @@ class FakeSandboxController:
             c.execute("INSERT OR REPLACE INTO sandboxes VALUES (?, 0)", (session_id,))
             c.execute("INSERT INTO sandbox_calls (session_id, op, created) VALUES (?, 'stop', 0)", (session_id,))
 
+    def lose(self, session_id: str) -> None:
+        """Test hook: the sandbox died on its own. Nobody is told; the next ensure() recreates it."""
+        with self._conn() as c:
+            c.execute("INSERT OR REPLACE INTO sandboxes VALUES (?, 0)", (session_id,))
+
     def calls(self, session_id: str) -> list[tuple[str, bool]]:
         with self._conn() as c:
             rows = c.execute("SELECT op, created FROM sandbox_calls WHERE session_id = ? ORDER BY id", (session_id,))

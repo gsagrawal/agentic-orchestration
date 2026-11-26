@@ -5,6 +5,13 @@ from agent_runtime.tools import ToolSpec
 
 TASK_QUEUE = "agent-executor"
 
+# How fast a dead worker is noticed. A tool call heartbeats every HEARTBEAT_INTERVAL_S; if Temporal
+# sees none for HEARTBEAT_TIMEOUT_S it fails the attempt and retries it elsewhere. Without
+# heartbeats the only signal would be the tool's whole start-to-close timeout (10-30 s here, and
+# minutes for a real code tool). These values are ASSUMPTIONS chosen for tests, not tuned.
+HEARTBEAT_INTERVAL_S = 1.0
+HEARTBEAT_TIMEOUT_S = 3.0
+
 
 @dataclass
 class AgentVersion:

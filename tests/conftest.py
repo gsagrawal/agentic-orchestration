@@ -46,3 +46,20 @@ async def env():
     e = await WorkflowEnvironment.start_time_skipping()
     yield e
     await e.shutdown()
+
+
+@pytest.fixture(scope="session")
+async def dev_env():
+    """Temporal dev server (integration tests; separate OS processes connect to it)."""
+    e = await WorkflowEnvironment.start_local()
+    yield e
+    await e.shutdown()
+
+
+@pytest.fixture
+def workers(dev_env, tmp_path):
+    from tests.helpers_runtime import WorkerProcesses
+
+    w = WorkerProcesses(dev_env.client.service_client.config.target_host, tmp_path)
+    yield w
+    w.cleanup()

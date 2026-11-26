@@ -122,5 +122,35 @@
         }
       ]
     }
+  },
+  "setter": {
+    "1": {
+      "tools": [
+        "set_value",
+        "lookup"
+      ],
+      "grants": [
+        "write",
+        "read"
+      ],
+      "step_cap": 20,
+      "script": [
+        {
+          "do": "tool",
+          "tool": "set_value",
+          "args": {
+            "k": "a"
+          }
+        },
+        {
+          "do": "tool",
+          "tool": "lookup",
+          "args": {}
+        },
+        {
+          "do": "finish"
+        }
+      ]
+    }
   }
 }
