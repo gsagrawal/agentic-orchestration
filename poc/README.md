@@ -9,7 +9,7 @@ containers. Design context: [../docs/service-architecture.md](../docs/service-ar
 ```bash
 pip install pytest      # the only host dependency besides Docker and Python 3.10+
 make demo               # scripted agent: pandoc, a credentialed call, a denied call, an escape attempt
-make test               # 110 tests, ~2 min
+make test               # 116 tests, ~2.5 min
 make bench              # cold start, 50 runs per configuration
 make down               # stop the proxy and stub
 ```
@@ -93,9 +93,9 @@ Not present at all: session-manager, ingress, auth, llm-gateway, object store, r
 | Controller refuses: a comma in the workdir or CA path, a non-dedicated workdir, one env var for two placeholders, malformed grants | `test_a_comma_in_the_workdir_cannot_inject_mount_options`, `test_one_env_var_cannot_stand_for_two_different_placeholders` |
 
 Cold start (measured; see [docs/cold-start.md](docs/cold-start.md) for the table and caveats): a fresh
-sandbox is ready in about 0.24-0.26 s without the proxy and about 0.36 s through it at p50 (p95 0.26-0.28 s and
-0.41 s), on a Linux VM. Stopping a proxied sandbox takes about 0.35 s. Pandoc in the image made no measurable
-difference to start time. These are local-image numbers: no pull, no Kubernetes, and run-to-run variation is about 10%.
+sandbox is ready in about 0.22 s without the proxy and about 0.33 s through it at p50 (p95 0.26 s and 0.38 s), on a
+Linux VM. Stopping a proxied sandbox takes about 0.38 s. Pandoc in the image made no measurable difference to start
+time. These are local-image numbers: no pull, no Kubernetes, and run-to-run variation is about 10%.
 
 ## What is not built (gaps)
 

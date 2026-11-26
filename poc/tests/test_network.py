@@ -687,3 +687,72 @@ def test_a_query_is_forwarded_byte_for_byte_apart_from_the_placeholder(proxied):
     before = len(lines(STUB_LOG))
     fetch(ctl, sbx, GITHUB + "?flag&q=a%20b&access_token=placeholder-github-token&z=%2B")
     assert lines(STUB_LOG)[before]["path"] == f"/user?flag&q=a%20b&access_token={SECRET}&z=%2B"
+
+
+def test_a_secret_with_special_characters_is_percent_encoded_in_a_query(proxied):
+    ctl, sbx = proxied(agent="agent-special", tenant="tenant-f")
+    before = len(lines(STUB_LOG))
+    fetch(ctl, sbx, GITHUB + "?access_token=placeholder-github-token&keep=1")
+    # `&`, `#`, `+`, `=` and a space in a secret must not change how the query is parsed upstream
+    assert lines(STUB_LOG)[before]["path"] == "/user?access_token=s3cr3t%2B%2F%3D%26admin%3D1%20%23x&keep=1"
+
+
+def test_failed_requests_do_not_use_up_the_rate_limit(proxied):
+    ctl, sbx = proxied(agent="agent-empty-secret", tenant="tenant-e")            # limit: 3 requests / 5 s; every request fails
+    outs = [fetch(ctl, sbx, GITHUB).stdout for _ in range(5)]
+    assert all("HTTPError 500" in o for o in outs), outs                       # never 429: errors did not consume tokens
+
+
+def test_workdir_setup_failures_do_not_disturb_the_live_sandbox(proxied, tmp_path, monkeypatch):
+    import pytest
+    from pathlib import Path as P
+    ctl, live = proxied(session="setup", epoch=1)
+    real_chmod = P.chmod
+    monkeypatch.setattr(P, "chmod", lambda self, mode: (_ for _ in ()).throw(PermissionError("not your directory")))
+    with pytest.raises(PermissionError):
+        ctl.create(tmp_path / "newdir", Caller(live.caller.session, "agent-a", "tenant-a", 2))
+    monkeypatch.setattr(P, "chmod", real_chmod)
+    assert live.alive and proxied.registry.newest_epoch(live.caller.key) == 1    # not fenced: the create never got that far
+
+
+def test_every_docker_call_is_bounded(proxied, tmp_path):
+    import pytest
+    from sandbox_controller import SandboxError
+    ctl, sbx = proxied()
+    slow = tmp_path / "docker"
+    slow.write_text("#!/bin/sh\nsleep 30\n")
+    slow.chmod(0o755)
+    real = ctl.docker
+    ctl.docker, ctl.docker_timeout_s = str(slow), 1
+    started = time.monotonic()
+    try:
+        with pytest.raises(SandboxError, match="timed out"):
+            ctl._docker(["ps"], "list")
+        with pytest.raises(SandboxError, match="timed out"):
+            ctl._remove_network("whatever")
+        assert time.monotonic() - started < 10
+    finally:
+        ctl.docker = real
+
+
+def test_the_sandbox_deadline_is_measured_from_when_the_container_started(proxied, tmp_path, monkeypatch):
+    # Registration after `docker run` can be slow (a contended registry lock). The container's own clock does
+    # not wait for it, so neither may the deadline the controller computes.
+    ctl, _ = proxied()
+    ran_at, real_docker, real_register = {}, ctl._docker, ctl.proxy.registry.register
+    def note_run(args, what):
+        out = real_docker(args, what)
+        if what == "create sandbox":
+            ran_at["t"] = time.monotonic()
+        return out
+    def slow_register(*a, **kw):
+        time.sleep(1.5)
+        return real_register(*a, **kw)
+    monkeypatch.setattr(ctl, "_docker", note_run)
+    monkeypatch.setattr(ctl.proxy.registry, "register", slow_register)
+    sbx = ctl.create(tmp_path / "dl2", Caller("s-dl2-" + uuid.uuid4().hex[:6], "agent-a", "tenant-a", 1))
+    monkeypatch.undo()
+    try:
+        assert sbx.expires_at <= ran_at["t"] + sbx.limits.deadline_s + 0.3
+    finally:
+        ctl.stop(sbx)

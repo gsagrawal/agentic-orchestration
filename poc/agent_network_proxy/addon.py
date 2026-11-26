@@ -20,6 +20,7 @@ import json
 import os
 import time
 from collections import defaultdict, deque
+from urllib.parse import quote
 from pathlib import Path
 
 from mitmproxy import ctx, http
@@ -123,18 +124,22 @@ class Gatekeeper:
 
     @fail_closed
     def request(self, flow: http.HTTPFlow) -> None:
-        caller, grant, reason = self._check(flow, count_rate=True)
+        caller, grant, reason = self._check(flow, count_rate=False)
         if reason:
             return self._deny(flow, caller, reason)
         secret = json.loads((CONFIG / "secrets.json").read_text())[caller.tenant][grant["credential"]]
         if not secret or not grant["placeholder"]:
             raise ValueError("empty secret or placeholder")       # an empty needle would corrupt every response
+        rl = json.loads((CONFIG / "grants.json").read_text())["tenants"][caller.tenant]["rate_limit"]
+        if not self.limiter.allow(caller.tenant, rl["requests"], rl["per_seconds"]):       # only now: errors above cost nothing
+            return self._deny(flow, caller, "rate limit")
         placeholder, real = grant["placeholder"].encode(), secret.encode()
         # Compute every rewrite first, so nothing can fail between the audit line and the request being released.
         swapped = [(k, swap(v, placeholder, real)) for k, v in flow.request.headers.fields]
         echoes = [new for (_, old), (_, new) in zip(flow.request.headers.fields, swapped) if new != old]   # e.g. a Basic blob
         path, _, raw_query = flow.request.path.partition("?")      # the raw text: every other byte is left as the client sent it
-        query = raw_query.replace(grant["placeholder"], secret) if grant["placeholder"] in raw_query else None
+        # A secret must not change how the query parses upstream (`&`, `#`, `+`, `=`, spaces), so it is percent-encoded.
+        query = raw_query.replace(grant["placeholder"], quote(secret, safe="")) if grant["placeholder"] in raw_query else None
         self._audit(flow, caller, "allow", None, grant["credential"], None)   # before the credential is used
         flow.request.headers.fields = tuple(swapped)
         if query is not None:

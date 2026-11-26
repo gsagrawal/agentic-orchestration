@@ -20,6 +20,12 @@
     },
     "tenant-e": {
       "rate_limit": {
+        "requests": 3,
+        "per_seconds": 5
+      }
+    },
+    "tenant-f": {
+      "rate_limit": {
         "requests": 100,
         "per_seconds": 60
       }
@@ -95,6 +101,20 @@
     },
     "agent-empty-secret": {
       "tenant": "tenant-e",
+      "tools": [
+        "bash",
+        "python"
+      ],
+      "destinations": {
+        "api.github.test": {
+          "credential": "github",
+          "env_var": "GH_TOKEN",
+          "placeholder": "placeholder-github-token"
+        }
+      }
+    },
+    "agent-special": {
+      "tenant": "tenant-f",
       "tools": [
         "bash",
         "python"

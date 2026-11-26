@@ -65,3 +65,14 @@ def test_registering_a_claim_that_was_superseded_is_refused(tmp_path):
     reg.unregister("sbx2")
     with pytest.raises(Superseded):                                  # and a claim that is simply gone
         reg.register("10.0.0.3", Caller("s", "a", "t", 2), "sbx3", claimed=True)
+
+
+def test_binary_garbage_is_an_error_and_clear_repairs_it(tmp_path):
+    import pytest
+    from agent_network_proxy.registry import RegistryError
+    reg = Registry(tmp_path / "registry.json")
+    reg.path.write_bytes(b"\xff\xfe\x00 not utf-8 \x80\x81")
+    with pytest.raises(RegistryError):
+        reg.lookup("10.0.0.1")
+    reg.clear()                                          # crash recovery must handle this too
+    assert reg.lookup("10.0.0.1") is None

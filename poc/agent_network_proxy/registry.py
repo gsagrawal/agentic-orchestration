@@ -58,7 +58,7 @@ class Registry:
             data = json.loads(self.path.read_text())
         except FileNotFoundError:
             return {"callers": {}, "epochs": {}}
-        except json.JSONDecodeError as exc:
+        except ValueError as exc:       # JSONDecodeError, and UnicodeDecodeError for a file of binary garbage
             raise RegistryError(f"{self.path} is not valid JSON: {exc}") from exc
         if not (isinstance(data, dict) and isinstance(data.get("callers"), dict) and isinstance(data.get("epochs"), dict)):
             raise RegistryError(f"{self.path} does not have the expected shape")

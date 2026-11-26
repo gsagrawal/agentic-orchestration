@@ -84,6 +84,7 @@ class SandboxController:
         self._by_session: dict[str, Sandbox] = {}     # keyed by Caller.key (tenant/session)
         self._proxy_name: str | None = None
         self.inspect_timeout_s = 10      # _exists() runs while the registry lock is held, so a hung daemon must not hang it
+        self.docker_timeout_s = 60       # every other docker call (exec has its own per-command timeout)
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -101,19 +102,20 @@ class SandboxController:
         self._check_workdir(workdir, owner)
         env = self._placeholder_env(caller) if self.proxy else {}   # all validation happens before anything is fenced or created
         name = f"sbx-{uuid.uuid4().hex[:12]}"
+        workdir.mkdir(parents=True, exist_ok=True)           # every step that can fail for local reasons
+        self._mark_workdir(workdir, owner)                   # happens before the fence, which cannot be undone
+        workdir.chmod(0o777)
         if caller:
             self._fence(caller, name)
         sandbox = Sandbox(name=name, workdir=workdir, limits=limits, caller=caller)
         try:
-            workdir.mkdir(parents=True, exist_ok=True)
-            self._mark_workdir(workdir, owner)
-            workdir.chmod(0o777)
             if self.proxy:
                 sandbox.network = f"agentpoc_{name}"
                 self._docker(["network", "create", "--internal", "--label", LABEL, sandbox.network], "create network")
                 self._docker(["network", "connect", "--alias", "proxy", sandbox.network, self._proxy_container()],
                              "attach proxy to sandbox network")
             self._docker(self._run_args(sandbox, user, env), "create sandbox")
+            sandbox.expires_at = time.monotonic() + limits.deadline_s    # the container's own clock started with `run`
             if self.proxy:
                 sandbox.ip = self._docker(
                     ["inspect", "-f", f'{{{{(index .NetworkSettings.Networks "{sandbox.network}").IPAddress}}}}', name],
@@ -131,7 +133,6 @@ class SandboxController:
                 raise SandboxError(f"{exc}; ALSO cleaning up {name} (network {sandbox.network}) failed: {cleanup}. "
                                    "Run reap() to remove it.") from exc
             raise
-        sandbox.expires_at = time.monotonic() + limits.deadline_s
         if caller:
             self._by_session[caller.key] = sandbox
         return sandbox
@@ -203,7 +204,7 @@ class SandboxController:
 
         if self.proxy:
             attempt(self.proxy.registry.unregister, sandbox.name)   # first: no window where a dying sandbox is trusted
-        attempt(subprocess.run, [self.docker, "kill", sandbox.name], capture_output=True)
+        attempt(self._run, ["kill", sandbox.name])
         gone = attempt(self._wait_until_gone, sandbox.name)
         if sandbox.network and gone:
             attempt(self._remove_network, sandbox.network)
@@ -229,7 +230,7 @@ class SandboxController:
             attempt(self.proxy.registry.clear)      # first, before anything that can fail: stop trusting every address
         ids = (attempt(self._docker, ["ps", "-aq", "--filter", f"label={LABEL}"], "list sandboxes") or "").split()
         if ids:
-            attempt(subprocess.run, [self.docker, "kill", *ids], capture_output=True)
+            attempt(self._run, ["kill", *ids])
         for container in ids:
             attempt(self._wait_until_gone, container)
         networks = attempt(self._docker, ["network", "ls", "-q", "--filter", f"label={LABEL}", "--format", "{{.Name}}"],
@@ -253,11 +254,11 @@ class SandboxController:
     def _remove_network(self, network: str) -> None:
         """Detach whatever is still attached (the proxy), then remove the network. Works from the network's own
         state, so it does not matter which controller instance, or whether one with a proxy, calls it."""
-        attached = subprocess.run([self.docker, "network", "inspect", network, "--format",
-                                   "{{range .Containers}}{{.Name}} {{end}}"], capture_output=True, text=True).stdout.split()
+        attached = self._run(["network", "inspect", network, "--format", "{{range .Containers}}{{.Name}} {{end}}"],
+                             text=True).stdout.split()
         for container in attached:
-            subprocess.run([self.docker, "network", "disconnect", "-f", network, container], capture_output=True)
-        done = subprocess.run([self.docker, "network", "rm", network], capture_output=True, text=True)
+            self._run(["network", "disconnect", "-f", network, container])
+        done = self._run(["network", "rm", network], text=True)
         if done.returncode != 0 and "No such network" not in done.stderr and "not found" not in done.stderr:
             raise SandboxError(f"could not remove network {network}: {done.stderr.strip()}")
 
@@ -341,10 +342,9 @@ class SandboxController:
         """True/False only when the daemon actually answered. Any other failure (daemon unreachable, ...) is an
         error: "I cannot tell" must never be read as "it is gone"."""
         try:
-            done = subprocess.run([self.docker, "inspect", name], capture_output=True, text=True,
-                                  timeout=self.inspect_timeout_s)
-        except subprocess.TimeoutExpired as exc:
-            raise SandboxError(f"cannot tell whether {name} exists: docker inspect timed out after {self.inspect_timeout_s}s") from exc
+            done = self._run(["inspect", name], timeout=self.inspect_timeout_s, text=True)
+        except SandboxError as exc:      # a timeout: the registry lock may be held, so this must be bounded and strict
+            raise SandboxError(f"cannot tell whether {name} exists: {exc}") from exc
         if done.returncode == 0:
             return True
         if "no such" in done.stderr.lower():
@@ -404,16 +404,23 @@ class SandboxController:
         is only a hint (a command can print anything), so confirm with the daemon."""
         if "Error response from daemon" not in stderr:
             return False
-        running = subprocess.run([self.docker, "inspect", "-f", "{{.State.Running}}", sandbox.name],
-                                 capture_output=True, text=True)
+        running = self._run(["inspect", "-f", "{{.State.Running}}", sandbox.name], text=True)
         if running.returncode == 0:
             return running.stdout.strip() != "true"
         if "no such" in running.stderr.lower():
             return True
         raise SandboxError(f"cannot tell whether {sandbox.name} is running: {running.stderr.strip()}")
 
+    def _run(self, args: list[str], timeout: float | None = None, **kw) -> subprocess.CompletedProcess:
+        """Every docker invocation except `exec` goes through here, so a hung daemon cannot hang the controller."""
+        timeout = self.docker_timeout_s if timeout is None else timeout
+        try:
+            return subprocess.run([self.docker, *args], capture_output=True, timeout=timeout, **kw)
+        except subprocess.TimeoutExpired as exc:
+            raise SandboxError(f"docker {args[0]} timed out after {timeout}s") from exc
+
     def _docker(self, args: list[str], what: str) -> str:
-        done = subprocess.run([self.docker, *args], capture_output=True, text=True)
+        done = self._run(args, text=True)
         if done.returncode != 0:
             raise SandboxError(f"{what} failed: {done.stderr.strip()}")
         return done.stdout.strip()
