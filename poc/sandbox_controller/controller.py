@@ -20,6 +20,7 @@ from pathlib import Path
 from agent_network_proxy.registry import Caller, Registry
 
 LABEL = "agent-sandbox=1"
+WORKDIR_MARKER = ".agent-sandbox-workdir"   # says "a sandbox controller created this directory for a sandbox"
 
 
 # All defaults are ASSUMPTIONS, not measurements. See docs/design-choices.md.
@@ -39,7 +40,7 @@ class ProxyConfig:
     ca_cert: Path                   # the proxy's PUBLIC certificate (never its key)
     registry: Registry
     grants_path: Path               # to learn which placeholder tokens an agent gets
-    proxy_container: str = "agentpoc-proxy-1"
+    proxy_container: str | None = None   # default: found by its Compose labels, so naming scheme does not matter
 
 
 @dataclass
@@ -77,6 +78,7 @@ class SandboxController:
                  docker: str = "docker"):
         self.image, self.proxy, self.docker = image, proxy, docker
         self._by_session: dict[str, Sandbox] = {}
+        self._proxy_name: str | None = None
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -93,7 +95,11 @@ class SandboxController:
         env = self._placeholder_env(caller) if self.proxy else {}   # validates before anything is fenced or created
         if caller:
             self._fence(caller)
+        if workdir.exists() and any(workdir.iterdir()) and not (workdir / WORKDIR_MARKER).exists():
+            raise SandboxError(f"workdir {workdir} is not dedicated to a sandbox: it exists, is not empty, and was not "
+                               "created by a sandbox controller (its mode would be changed to 0777 and it would be mounted writable)")
         workdir.mkdir(parents=True, exist_ok=True)
+        (workdir / WORKDIR_MARKER).touch()
         workdir.chmod(0o777)
         name = f"sbx-{uuid.uuid4().hex[:12]}"
         sandbox = Sandbox(name=name, workdir=workdir, limits=limits, caller=caller)
@@ -101,7 +107,7 @@ class SandboxController:
             if self.proxy:
                 sandbox.network = f"agentpoc_{name}"
                 self._docker(["network", "create", "--internal", "--label", LABEL, sandbox.network], "create network")
-                self._docker(["network", "connect", "--alias", "proxy", sandbox.network, self.proxy.proxy_container],
+                self._docker(["network", "connect", "--alias", "proxy", sandbox.network, self._proxy_container()],
                              "attach proxy to sandbox network")
             self._docker(self._run_args(sandbox, user, env), "create sandbox")
             if self.proxy:
@@ -144,9 +150,9 @@ class SandboxController:
         sandbox.alive = False
         errors: list[Exception] = []
 
-        def attempt(step, *args) -> bool:
+        def attempt(step, *args, **kwargs) -> bool:
             try:
-                step(*args)
+                step(*args, **kwargs)
                 return True
             except Exception as exc:  # noqa: BLE001 - collected and re-raised below
                 errors.append(exc)
@@ -154,7 +160,7 @@ class SandboxController:
 
         if self.proxy:
             attempt(self.proxy.registry.unregister, sandbox.name)   # first: no window where a dying sandbox is trusted
-        subprocess.run([self.docker, "kill", sandbox.name], capture_output=True)
+        attempt(subprocess.run, [self.docker, "kill", sandbox.name], capture_output=True)
         gone = attempt(self._wait_until_gone, sandbox.name)
         if sandbox.network and gone:
             attempt(self._remove_network, sandbox.network)
@@ -209,6 +215,18 @@ class SandboxController:
         if done.returncode != 0 and "No such network" not in done.stderr and "not found" not in done.stderr:
             raise SandboxError(f"could not remove network {network}: {done.stderr.strip()}")
 
+    def _proxy_container(self) -> str:
+        if self.proxy.proxy_container:
+            return self.proxy.proxy_container
+        if self._proxy_name is None:
+            found = self._docker(["ps", "--filter", "label=com.docker.compose.service=proxy", "--filter",
+                                  "label=com.docker.compose.project=agentpoc", "--format", "{{.Names}}"],
+                                 "find the proxy container").split()
+            if len(found) != 1:
+                raise SandboxError(f"expected exactly one running proxy container (run `make demo` or `python3 stack.py up`), found {found}")
+            self._proxy_name = found[0]
+        return self._proxy_name
+
     @staticmethod
     def _check_mount_path(path: Path, what: str) -> None:
         if "," in str(path) or "\n" in str(path):
@@ -218,14 +236,17 @@ class SandboxController:
         """The placeholder tokens this agent's sandbox gets, as {env var: placeholder}. Refuses an agent that
         does not belong to the caller's tenant, and one env var standing for two different placeholders
         (one would silently win, and calls to the other destination would go out with no credential)."""
-        agent = json.loads(self.proxy.grants_path.read_text())["agents"].get(caller.agent)
-        if agent is None or agent["tenant"] != caller.tenant:
-            raise SandboxError(f"agent/tenant mismatch: {caller.agent} is not a member of tenant {caller.tenant}")
-        env: dict[str, str] = {}
-        for dest in agent["destinations"].values():
-            if env.setdefault(dest["env_var"], dest["placeholder"]) != dest["placeholder"]:
-                raise SandboxError(f"env var {dest['env_var']} is mapped to two different placeholders")
-        return env
+        try:
+            agent = json.loads(self.proxy.grants_path.read_text())["agents"].get(caller.agent)
+            if agent is None or agent["tenant"] != caller.tenant:
+                raise SandboxError(f"agent/tenant mismatch: {caller.agent} is not a member of tenant {caller.tenant}")
+            env: dict[str, str] = {}
+            for dest in agent["destinations"].values():
+                if env.setdefault(dest["env_var"], dest["placeholder"]) != dest["placeholder"]:
+                    raise SandboxError(f"env var {dest['env_var']} is mapped to two different placeholders")
+            return env
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:    # unparsable or wrongly shaped grants
+            raise SandboxError(f"cannot read the grants for {caller.agent}: {type(exc).__name__}: {exc}") from exc
 
     def _fence(self, caller: Caller) -> None:
         """A newer epoch supersedes older ones: their sandboxes are stopped. An older epoch is refused, and so is
@@ -290,11 +311,14 @@ class SandboxController:
             proc.kill()
             try:
                 self.stop(sandbox)
+            except Exception:  # noqa: BLE001 - the caller must still learn the command was cut off; the executor retries
+                pass           # the cleanup because stop() leaves `sandbox.stopped` False when it fails
             finally:
                 proc.wait()
         out.join(), err.join()
         if not timed_out and proc.returncode != 0 and self._vanished(sandbox, err.text()):
-            self.stop(sandbox)
+            with contextlib.suppress(Exception):   # the container is already gone; leftover cleanup is retried later
+                self.stop(sandbox)
             raise SandboxGone(f"{sandbox.name} is gone (deadline reached or killed); the command was not started")
         return ExecResult(exit_code=proc.returncode, stdout=out.text(), stderr=err.text(),
                           timed_out=timed_out, duration_s=time.monotonic() - start,

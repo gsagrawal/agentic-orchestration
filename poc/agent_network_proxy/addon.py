@@ -8,7 +8,9 @@ A mitmproxy addon. For every request it:
   5. writes the audit line BEFORE the credential is used: no audit record, no credential,
   6. swaps the placeholder token for the real credential from the secrets file,
   7. scrubs the real credential out of the response and audits the outcome.
-Fails closed: any doubt, including an unexpected exception in any hook, is a denial.
+Fails closed: any doubt, including an unexpected exception in any hook, is a denial. Only HTTP request/response
+traffic is understood, so everything else is refused: WebSocket upgrades are denied here and the raw-TCP
+fallback is switched off in docker-compose.yml (`rawtcp=false`); neither could be audited or scrubbed.
 """
 from __future__ import annotations
 
@@ -86,6 +88,8 @@ class Gatekeeper:
             return caller, None, "port not granted"
         if flow.request.method != "CONNECT" and flow.request.scheme != "https":
             return caller, None, "plaintext not permitted"
+        if flow.request.headers.get("Upgrade") or "upgrade" in flow.request.headers.get("Connection", "").lower():
+            return caller, None, "upgrade not permitted"      # WebSocket frames would bypass audit and scrubbing
         if count_rate:
             rl = grants["tenants"][caller.tenant]["rate_limit"]
             if not self.limiter.allow(caller.tenant, rl["requests"], rl["per_seconds"]):

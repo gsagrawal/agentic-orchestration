@@ -304,3 +304,91 @@ def test_the_registry_directory_is_not_world_writable(stack):
 def test_base_images_are_pinned_by_digest():
     for dockerfile in ("image/Dockerfile", "agent_network_proxy/Dockerfile"):
         assert "@sha256:" in (STATE.parent / dockerfile).read_text(), dockerfile
+
+
+RAW = """
+import socket
+s = socket.create_connection(("proxy", 8080), 5)
+s.sendall(b"CONNECT api.github.test:443 HTTP/1.1\\r\\nHost: api.github.test:443\\r\\n\\r\\n"); s.recv(200)
+s.sendall(b"SSH-2.0-test\\r\\n"); s.settimeout(3)
+try:
+    print("EOF" if s.recv(200) == b"" else "DATA")
+except TimeoutError:
+    print("HELD")
+"""
+
+
+def test_non_http_traffic_inside_a_granted_tunnel_is_not_relayed(proxied):
+    # With mitmproxy's raw-TCP fallback on, bytes that are not HTTP are passed to the upstream server (it hangs up
+    # at once: EOF), and none of it is audited, rate limited or scrubbed. With it off, the proxy refuses to relay.
+    ctl, sbx = proxied()
+    assert py(ctl, sbx, RAW).stdout.strip() == "HELD"
+
+
+def test_a_websocket_upgrade_is_denied(proxied):
+    ctl, sbx = proxied()
+    code = ("import urllib.request as u\n"
+            "r = u.Request('https://api.github.test/user', headers={'Connection': 'Upgrade', 'Upgrade': 'websocket'})\n"
+            "try:\n    print(u.urlopen(r, timeout=6).status)\nexcept Exception as e:\n    print(repr(e))")
+    assert "HTTPError 403" in py(ctl, sbx, code).stdout
+    assert lines(AUDIT_LOG)[-1]["reason"] == "upgrade not permitted"
+
+
+def test_the_proxy_container_is_found_by_its_compose_labels(proxied):
+    ctl, _ = proxied()
+    assert ctl._proxy_container() == "agentpoc-proxy-1"
+
+
+def test_malformed_grants_are_a_sandbox_error_not_a_crash(tmp_path):
+    import dataclasses
+    import pytest
+    from agent_network_proxy.registry import Registry
+    from sandbox_controller import ProxyConfig, SandboxController, SandboxError
+    for bad in ("{ not json", json.dumps({"agents": {"a": {"tenant": "t"}}})):       # unparsable; missing "destinations"
+        grants = tmp_path / "grants.json"
+        grants.write_text(bad)
+        ctl = SandboxController(proxy=ProxyConfig("http://proxy:8080", STATE / "proxy-conf" / "mitmproxy-ca-cert.pem",
+                                                  Registry(tmp_path / "r.json"), grants))
+        with pytest.raises(SandboxError, match="grants"):
+            ctl.create(tmp_path / "wd", Caller("s", "a", "t", 1))
+
+
+def test_a_workdir_that_is_not_dedicated_is_refused(make_sandbox, tmp_path):
+    import pytest
+    from sandbox_controller import SandboxError
+    precious = tmp_path / "my-project"
+    precious.mkdir()
+    (precious / "notes.txt").write_text("not for the sandbox")
+    with pytest.raises(SandboxError, match="not dedicated"):
+        make_sandbox("my-project")                       # an existing, non-empty directory the controller did not create
+    assert not precious.stat().st_mode & 0o002           # and it was not made world-writable
+    ctl, sbx = make_sandbox("fresh")
+    ctl.stop(sbx)
+    make_sandbox("fresh")                                # a directory the controller created can be reused (a resumed session)
+
+
+def test_a_failed_stop_after_a_timeout_does_not_lose_the_result(proxied, monkeypatch):
+    ctl, sbx = proxied()
+    real_stop = ctl.stop
+    def stop_then_fail(sandbox):
+        real_stop(sandbox)
+        raise OSError("registry unwritable")
+    monkeypatch.setattr(ctl, "stop", stop_then_fail)
+    result = ctl.exec(sbx, ["sleep", "30"], timeout_s=1)
+    assert result.timed_out                              # the caller still learns the command was cut off
+
+
+def test_stop_survives_a_broken_docker_client(proxied):
+    import pytest
+    ctl, sbx = proxied()
+    real = ctl.docker
+    ctl.docker = "/nonexistent/docker"
+    try:
+        with pytest.raises(OSError):
+            ctl.stop(sbx)
+        assert not sbx.stopped
+        assert ctl._by_session.get(sbx.caller.session) is None      # in-memory state is cleaned regardless
+    finally:
+        ctl.docker = real
+        ctl.stop(sbx)                                                # and a retry then succeeds
+    assert sbx.stopped

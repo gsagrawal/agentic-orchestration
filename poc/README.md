@@ -9,7 +9,7 @@ containers. Design context: [../docs/service-architecture.md](../docs/service-ar
 ```bash
 pip install pytest      # the only host dependency besides Docker and Python 3.10+
 make demo               # scripted agent: pandoc, a credentialed call, a denied call, an escape attempt
-make test               # 72 tests, ~90 s
+make test               # 79 tests, ~100 s
 make bench              # cold start, 50 runs per configuration
 make down               # stop the proxy and stub
 ```
@@ -39,7 +39,7 @@ Not present at all: session-manager, ingress, auth, llm-gateway, object store, r
 - **Sandbox:** read-only root filesystem, size-capped tmpfs scratch, non-root user, all capabilities dropped, no-new-privileges, CPU / memory (no swap) / process-count limits, a hard deadline that is the container's own lifetime, a mounted work dir, output capped. Every flag is explained in [docs/docker-flags.md](docs/docker-flags.md).
 - **Timeout kill:** a command past its timeout takes the whole sandbox down (verified gone, not just the client).
 - **Network:** every sandbox gets its own Docker `--internal` network, shared with nothing but the proxy. It has no route to the internet, the stub or any other sandbox, and cannot resolve outside names or other sandboxes' names. The network is removed when the sandbox stops.
-- **Proxy (real mitmproxy):** identifies the caller by source address from a registry file (never from request contents); rejects a stale epoch or an agent/tenant mismatch; checks host, port and HTTPS against the agent's grants; applies a per-tenant sliding-window rate limit; writes the audit line *before* using the credential, then swaps the placeholder for the real token; scrubs the real value from the response; audits the outcome, including failures. Names the credential, never its value. Anything doubtful, including an exception inside the proxy, is denied.
+- **Proxy (real mitmproxy):** identifies the caller by source address from a registry file (never from request contents); rejects a stale epoch or an agent/tenant mismatch; checks host, port and HTTPS against the agent's grants; applies a per-tenant sliding-window rate limit; writes the audit line *before* using the credential, then swaps the placeholder for the real token; scrubs the real value from the response; audits the outcome, including failures. Names the credential, never its value. Anything doubtful, including an exception inside the proxy, is denied. Only HTTP request/response traffic is understood, so WebSocket upgrades are denied and mitmproxy's raw-TCP fallback is switched off (it would relay bytes that nothing audits, limits or scrubs).
 - **Credential handling:** the sandbox gets a placeholder token and the proxy's *public* certificate only. The real token reaches the stub; it is not in the sandbox's environment, filesystem or output.
 - **Fencing:** starting a sandbox with a newer epoch stops the old one; an older epoch is refused; a zombie with a stale epoch is rejected by the proxy.
 - **Executor:** checks each tool call against the agent's grants, a step cap and a session deadline, creates the sandbox lazily, replaces a sandbox that vanished (only when the command never started), appends every step to a session log.
@@ -68,6 +68,7 @@ Not present at all: session-manager, ingress, auth, llm-gateway, object store, r
 | Direct request to the stub fails; no internet, no DNS | `test_direct_request_to_the_stub_fails`, `test_no_route_to_the_internet_and_no_dns` |
 | One sandbox cannot reach another; networks are cleaned up | `test_sandboxes_cannot_reach_each_other`, `test_stopping_a_sandbox_removes_its_network` |
 | Plaintext HTTP and ungranted ports are not forwarded | `test_plaintext_http_and_other_ports_are_not_forwarded` |
+| Non-HTTP bytes and WebSocket upgrades are not relayed | `test_non_http_traffic_inside_a_granted_tunnel_is_not_relayed`, `test_a_websocket_upgrade_is_denied` |
 | A proxy error denies rather than forwards, even with a corrupt registry | `test_a_policy_error_denies_instead_of_forwarding`, `test_a_corrupt_registry_denies_everything` |
 | Query strings pass through untouched except for the placeholder | `test_query_strings_are_left_alone_except_for_the_placeholder` |
 | Failed upstream calls are still audited | `test_a_failed_upstream_call_is_still_audited` |
@@ -83,7 +84,7 @@ Not present at all: session-manager, ingress, auth, llm-gateway, object store, r
 | Stale epoch rejected; new epoch stops the old sandbox | `test_zombie_with_a_stale_epoch_is_rejected_by_the_proxy`, `test_new_epoch_stops_the_old_sandbox`, `test_stale_epoch_cannot_start_a_sandbox` |
 | Pinned-certificate tool fails closed, no credential | `test_a_tool_that_pins_the_certificate_fails_closed_with_no_credential` |
 | Executor: grants, step cap, lazy sandbox, log, session deadline, lost-sandbox replacement, no-proxy controller, no leak on unexpected failure, rejects tools it cannot run | `tests/test_executor.py` |
-| Controller refuses: a comma in the workdir, one env var for two placeholders | `test_a_comma_in_the_workdir_cannot_inject_mount_options`, `test_one_env_var_cannot_stand_for_two_different_placeholders` |
+| Controller refuses: a comma in the workdir or CA path, a non-dedicated workdir, one env var for two placeholders, malformed grants | `test_a_comma_in_the_workdir_cannot_inject_mount_options`, `test_one_env_var_cannot_stand_for_two_different_placeholders` |
 
 Cold start (measured; see [docs/cold-start.md](docs/cold-start.md) for the table and caveats): a fresh
 sandbox is ready in about 0.24-0.26 s without the proxy and about 0.36 s through it at p50 (p95 0.26-0.28 s and
@@ -113,7 +114,7 @@ difference to start time. These are local-image numbers: no pull, no Kubernetes,
 - No size limit on the work dir, which must be dedicated to its sandbox (the controller makes it world-writable); no object-store restore/flush.
 - Replay edge case: the executor re-runs a command in a fresh sandbox only when `docker exec` could not start it, which it recognises from the daemon's error text plus an inspect (D30). A command that itself prints that exact text, exits non-zero, and runs in a sandbox that dies at the same instant would be replayed once. No privilege is gained (the agent could simply call the tool twice), but it is not strictly "exactly once".
 - Durability: the session log is written but there is no resume, no heartbeat, no reconciler. The controller's session map is in memory.
-- One controller instance is the supported shape (D16). A second or restarted one is fenced through the registry (stale epochs refused, older sandboxes stopped, an equal epoch refused while another sandbox lives, D43), but that is exercised only by tests that build a second controller in-process, not by real concurrent controllers.
+- One controller instance is the supported shape (D16). A second or restarted one is fenced through the registry (stale epochs refused, older sandboxes stopped, an equal epoch refused while another sandbox lives, D43), but that is exercised only by tests that build a second controller in-process. The fence is check-then-act and not atomic, so two controllers racing on the same session and epoch could both succeed.
 - Single process, no concurrency control. Nothing here shows the 1000-agent / 10k-calls-per-minute target.
 - No usage metering, cost rollup or tracing.
 - Resource limits are assumptions (D6), not tuned values.
