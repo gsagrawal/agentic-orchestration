@@ -30,6 +30,8 @@ def agents_path(tmp_path):
     agents = {
         "two-tools": {"1": {"script": [tool("lookup", key="a"), tool("send_email", to="x"), {"do": "finish"}]}},
         "ask-human": {"1": {"script": [tool("lookup", key="a"), {"do": "wait"}, {"do": "finish"}]}},
+        "set-value": {"1": {"script": [tool("set_value", key="k"), {"do": "finish"}]}},
+        "send-email": {"1": {"script": [tool("send_email", to="x"), {"do": "finish"}]}},
         "poison": {"1": {"script": [tool("lookup", key="a")], "loop": True}},
     }
     path = tmp_path / "agents.json"

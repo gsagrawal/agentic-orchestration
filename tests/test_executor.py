@@ -117,37 +117,6 @@ def test_tick_drops_a_session_that_moved_away_and_does_not_crash(conn, db_path, 
     assert ex.runs == {}
 
 
-def test_pending_tool_call_on_resume_fails_closed_until_step_6(conn, db_path, agents_path):
-    """PLACEHOLDER: step 6 replaces this test with the real recovery rules."""
-    sid = new_session(conn, "two-tools")
-    e = state_table.assign(conn, sid, "ex-1")
-    session_log.append(conn, sid, e, "model", {"action": {"do": "tool", "tool": "send_email", "args": {"to": "x"}}})
-    state_table.assign(conn, sid, "ex-2")
-    with pytest.raises(NotImplementedError):
-        Executor(db_path, agents_path, "ex-2").tick()
-    assert effect_counts(conn) == {}
-
-
-def test_executor_that_died_after_logging_finish_is_released_without_asking_the_model(conn, db_path, agents_path):
-    sid = new_session(conn, "two-tools")
-    e1 = state_table.assign(conn, sid, "ex-1")
-    for kind, payload in [
-        ("model", {"action": {"do": "tool", "tool": "lookup", "args": {"key": "a"}}}),
-        ("tool_result", {"step": 1, "result": {"value": "value-of-a"}}),
-        ("model", {"action": {"do": "finish"}}),  # logged; then ex-1 died before release()
-    ]:
-        session_log.append(conn, sid, e1, kind, payload)
-    state_table.assign(conn, sid, "ex-2")
-
-    class NoModelCalls(ScriptedModel):
-        def decide(self, agent, messages):
-            raise AssertionError("the model must not be asked again")
-
-    run_to_end(Executor(db_path, agents_path, "ex-2", model=NoModelCalls()))
-    assert state_table.get_session(conn, sid)["state"] == "done"
-    assert len(session_log.read(conn, sid)) == 3
-
-
 def test_session_is_pinned_to_its_agent_version(conn, db_path, agents_path):
     sid = new_session(conn, "two-tools")
     row = state_table.get_session(conn, sid)

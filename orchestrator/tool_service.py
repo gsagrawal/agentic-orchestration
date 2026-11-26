@@ -37,6 +37,9 @@ class ToolService:
         self._tools = tools
         self._fault = fault_hook or (lambda point: None)
 
+    def is_idempotent(self, tool_name: str) -> bool:
+        return self._tools[tool_name].idempotent
+
     def lookup(self, session_id: str, step: int, epoch: int) -> dict | None:
         """The stored result for this call, or None. Used by an executor resuming after a crash."""
         self._check_epoch(session_id, epoch)
