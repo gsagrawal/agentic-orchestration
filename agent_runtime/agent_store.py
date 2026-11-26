@@ -23,4 +23,6 @@ def load_agent(agent_id: str, version: int, path: Path = DEFAULT_PATH) -> AgentV
         script=data["script"],
         loop=data.get("loop", False),
         wait_expiry_s=data.get("wait_expiry_s", 86400.0),
+        active_limit_s=data.get("active_limit_s", 3600.0),
+        continue_after_steps=data.get("continue_after_steps", 0),
     )

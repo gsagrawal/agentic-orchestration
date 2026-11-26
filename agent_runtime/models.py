@@ -25,6 +25,23 @@ class AgentVersion:
     script: list[dict]  # FAKED model: the steps it will take, see scripted_model.py
     loop: bool = False  # FAKED model: repeat the script forever (the "poison" agent)
     wait_expiry_s: float = 86400.0  # how long a session may wait for a human (the waiting timer)
+    # The active-run limit: the manager sets it as the workflow EXECUTION timeout. Temporal counts
+    # it as wall time from the start of the session, waiting included and across continue-as-new, so
+    # it is really a lifetime limit; keep wait_expiry_s below it or the wait can never expire.
+    active_limit_s: float = 3600.0
+    continue_after_steps: int = 0  # continue-as-new after this many steps in one run; 0 = never
+
+
+@dataclass
+class SessionState:
+    """Everything the loop needs to carry into the next run after continue-as-new."""
+
+    history: list[dict]
+    step: int
+    seen_message_ids: list[str]
+    sandbox_created_before: bool
+    sandbox_used: bool
+    continued: int  # how many times this session has continued as new
 
 
 @dataclass
@@ -33,6 +50,7 @@ class SessionInput:
     tenant: str
     agent: AgentVersion
     message: str
+    carry: SessionState | None = None  # None on the first run
 
 
 @dataclass
@@ -40,6 +58,7 @@ class SessionResult:
     status: str  # "finished", "step_cap", "stopped" or "expired"
     steps: int
     history: list[dict] = field(default_factory=list)
+    continued: int = 0
 
 
 @dataclass

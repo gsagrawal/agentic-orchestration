@@ -10,11 +10,11 @@ bench:
 
 # Temporal-based runtime (agent_runtime/); the older orchestrator/ tests run under `make test`.
 test-runtime:  # unit tests: tool service + workflow in the Temporal test environment (time skipping)
-	python3 -m pytest -q tests/test_agent_runtime_tool_service.py tests/test_agent_runtime_workflow.py
+	python3 -m pytest -q -m 'not integration' tests/test_agent_runtime_*.py
 
 # Needs the Temporal dev server and real worker processes.
 test-integration:
-	python3 -m pytest -q -m integration
+	python3 -m pytest -q -m integration tests/test_agent_runtime_*.py
 
 # Needs the Temporal dev server, which the temporalio SDK downloads on first use.
 demo-runtime:

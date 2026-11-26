@@ -5,6 +5,7 @@ Admission is checked before the workflow is started. The manager keeps one small
 """
 import sqlite3
 import uuid
+from datetime import timedelta
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -90,7 +91,7 @@ class SessionManager:
         return session_id
 
     def _timeouts(self, agent) -> dict:
-        return {}  # the active-run limit is added in step 7
+        return {"execution_timeout": timedelta(seconds=agent.active_limit_s)}  # the active-run limit
 
     async def _close_finished(self, tenant: str) -> None:
         """Quota counts sessions that are still running. Ask Temporal which ones are not.

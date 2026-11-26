@@ -17,7 +17,8 @@ from temporalio.common import RetryPolicy
 with workflow.unsafe.imports_passed_through():
     from agent_runtime.activities import Activities
     from agent_runtime.models import (
-        HEARTBEAT_TIMEOUT_S, HumanRequest, MessageSignal, ModelRequest, ReplySignal, SessionInput, SessionResult, ToolCall,
+        HEARTBEAT_TIMEOUT_S, HumanRequest, MessageSignal, ModelRequest, ReplySignal, SessionInput, SessionResult,
+        SessionState, ToolCall,
     )
 
 # Retries are unbounded by design (tool calls are at-least-once); only the backoff is capped.
@@ -65,11 +66,15 @@ class AgentSession:
     async def run(self, inp: SessionInput) -> SessionResult:
         agent = inp.agent
         specs = {t.name: t for t in agent.tools}
-        history: list[dict] = [{"role": "user", "content": inp.message}]
-        sandbox_used = False
-        sandbox_created_before = False
-        step = 0
+        carry = inp.carry or SessionState([{"role": "user", "content": inp.message}], 0, [], False, False, 0)
+        history = carry.history
+        self._seen_message_ids = set(carry.seen_message_ids)
+        sandbox_used = carry.sandbox_used
+        sandbox_created_before = carry.sandbox_created_before
+        step = carry.step
+        first_step_of_run = step
         status = "finished"
+        continuing = False
         try:
             while True:
                 history.extend(self._inbox)  # step boundary: messages become visible to the model
@@ -80,6 +85,14 @@ class AgentSession:
                 if step >= agent.step_cap:
                     status = "step_cap"
                     break
+                if agent.continue_after_steps and step - first_step_of_run >= agent.continue_after_steps:
+                    # Long history: start a fresh run, carrying the history forward. The sandbox is kept.
+                    continuing = True
+                    workflow.continue_as_new(SessionInput(
+                        inp.session_id, inp.tenant, agent, inp.message,
+                        SessionState(history, step, sorted(self._seen_message_ids), sandbox_created_before,
+                                     sandbox_used, carry.continued + 1),
+                    ))
                 action = await workflow.execute_activity_method(
                     Activities.call_model,
                     ModelRequest(inp.session_id, step, history, agent.script, agent.loop),
@@ -125,12 +138,12 @@ class AgentSession:
                     history.append({"role": "tool", "step": step, "tool": spec.name, **result})
                 step += 1
         finally:
-            if sandbox_used:
+            if sandbox_used and not continuing:
                 await workflow.execute_activity_method(
                     Activities.stop_sandbox, inp.session_id,
                     start_to_close_timeout=SHORT_TIMEOUT, retry_policy=RETRY,
                 )
-        return SessionResult(status=status, steps=step, history=history)
+        return SessionResult(status=status, steps=step, history=history, continued=carry.continued)
 
     async def _ask_human(self, session_id: str, step: int, question: str, wait_expiry_s: float, history: list[dict]) -> bool:
         """Notify once, then wait on a signal with no worker held. True if a reply arrived."""

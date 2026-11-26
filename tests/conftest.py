@@ -40,9 +40,12 @@ def agents_path(tmp_path):
     return str(path)
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture
 async def env():
-    """Temporal test environment with time skipping (agent_runtime tests)."""
+    """Temporal test environment with time skipping (agent_runtime tests).
+
+    One server per test, on purpose: a session left running by one test (e.g. a quota test that
+    starts sessions with no worker) would stall time skipping in every test after it."""
     e = await WorkflowEnvironment.start_time_skipping()
     yield e
     await e.shutdown()

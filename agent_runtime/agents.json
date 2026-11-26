@@ -76,7 +76,7 @@
         "read"
       ],
       "step_cap": 20,
-      "wait_expiry_s": 3600,
+      "wait_expiry_s": 1800,
       "script": [
         {
           "do": "ask_human",
@@ -151,6 +151,33 @@
           "do": "finish"
         }
       ]
+    }
+  },
+  "asker-limited": {
+    "1": {
+      "tools": [
+        "lookup"
+      ],
+      "grants": [
+        "read"
+      ],
+      "step_cap": 20,
+      "wait_expiry_s": 7200,
+      "script": [
+        {
+          "do": "ask_human",
+          "question": "Proceed?"
+        },
+        {
+          "do": "tool",
+          "tool": "lookup",
+          "args": {}
+        },
+        {
+          "do": "finish"
+        }
+      ],
+      "active_limit_s": 3600
     }
   }
 }

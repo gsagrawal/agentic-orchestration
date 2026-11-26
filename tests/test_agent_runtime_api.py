@@ -10,6 +10,7 @@ from agent_runtime.sandbox import FakeSandboxController
 from agent_runtime.session_manager import Quotas, SessionManager
 from agent_runtime.tool_service import ToolService
 from agent_runtime.workflow import AgentSession
+from tests.helpers_runtime import System, start, wait_until
 
 
 @pytest.fixture
@@ -19,10 +20,6 @@ def make_api(env, tmp_path):
         return httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(manager)), base_url="http://api")
 
     return make
-
-
-def start(api, tenant, user="u1", agent="researcher"):
-    return api.post("/sessions", json={"agent_id": agent, "message": "hi"}, headers={"X-Tenant": tenant, "X-User": user})
 
 
 async def test_tenant_over_quota_is_refused_and_other_tenants_are_not_affected(make_api):
@@ -56,48 +53,8 @@ async def test_quota_slot_is_freed_when_a_session_finishes(env, make_api, tmp_pa
 
 # ---------------------------------------------------------------- step 5: human, messages, stop
 
-from agent_runtime.models import MessageSignal, ReplySignal
-from agent_runtime.notifier import FakeNotifier
-from agent_runtime.scripted_model import ScriptedModel
-from agent_runtime.tools import FakeTools
-from tests.helpers_runtime import wait_until
-
-
-class System:
-    """A manager + API + in-process worker over one tmp dir, with an inspectable model."""
-
-    def __init__(self, env, tmp_path, task_queue, tool_delay_s=0.0, quotas=None):
-        self.env = env
-        self.task_queue = task_queue
-        self.tools = ToolService(str(tmp_path / "t.db"), tools=FakeTools(delay_s=tool_delay_s))
-        self.notifier = FakeNotifier(str(tmp_path / "n.db"))
-        self.model = ScriptedModel()
-        self.sandbox = FakeSandboxController(str(tmp_path / "s.db"))
-        acts = Activities(self.tools, self.sandbox, self.notifier, self.model)
-        self.worker = Worker(env.client, task_queue=task_queue, workflows=[AgentSession], activities=acts.all)
-        manager = SessionManager(env.client, str(tmp_path / "m.db"), quotas or Quotas(default_max_active=50), task_queue=task_queue)
-        self.api = httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(manager)), base_url="http://api")
-
-    async def __aenter__(self):
-        await self.worker.__aenter__()
-        return self
-
-    async def __aexit__(self, *exc):
-        await self.worker.__aexit__(*exc)
-
-    async def start(self, agent, tenant="acme", user="u1") -> str:
-        r = await start(self.api, tenant, user, agent)
-        assert r.status_code == 201, r.text
-        return r.json()["session_id"]
-
-    def handle(self, sid):
-        return self.env.client.get_workflow_handle_for(AgentSession.run, sid)
-
-    async def _is(self, sid, step):
-        return await self.handle(sid).query(AgentSession.open_step) == step
-
-    def post(self, sid, path, body=None, tenant="acme", user="u1"):
-        return self.api.post(f"/sessions/{sid}/{path}", json=body, headers={"X-Tenant": tenant, "X-User": user})
+from agent_runtime.models import ReplySignal
+from tests.helpers_runtime import System, start, wait_until
 
 
 async def test_reply_for_the_open_step_wakes_the_session(env, tmp_path):
