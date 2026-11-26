@@ -1,4 +1,4 @@
-"""SQLite plumbing: one file holds the state table and the session log.
+"""SQLite plumbing: one file holds the state table, the session log and the tool service tables.
 
 Every process (session manager, each executor) opens its own connection.
 WAL mode lets readers run while one writer commits.
@@ -43,6 +43,31 @@ CREATE TRIGGER IF NOT EXISTS session_log_no_update BEFORE UPDATE ON session_log
 BEGIN SELECT RAISE(ABORT, 'session_log is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS session_log_no_delete BEFORE DELETE ON session_log
 BEGIN SELECT RAISE(ABORT, 'session_log is append-only'); END;
+
+-- Tool service tables (see tool_service.py).
+-- One stored result per idempotency key ("<session_id>:<step>").
+CREATE TABLE IF NOT EXISTS tool_results (
+    idem_key   TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    step       INTEGER NOT NULL,
+    tool       TEXT NOT NULL,
+    args       TEXT NOT NULL,  -- canonical JSON, to catch a key reused for a different call
+    result     TEXT NOT NULL   -- JSON
+);
+
+-- Effects ledger: one row per time a tool REALLY ran. Deliberately has no
+-- uniqueness constraint: tests count rows per (session, step) to find double effects.
+CREATE TABLE IF NOT EXISTS effects (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT    NOT NULL,
+    step       INTEGER NOT NULL,
+    tool       TEXT    NOT NULL,
+    epoch      INTEGER NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS effects_no_update BEFORE UPDATE ON effects
+BEGIN SELECT RAISE(ABORT, 'effects is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS effects_no_delete BEFORE DELETE ON effects
+BEGIN SELECT RAISE(ABORT, 'effects is append-only'); END;
 """
 
 

@@ -15,3 +15,7 @@ class UnknownSession(Exception):
 
 class SessionClosed(Exception):
     """The session is in a terminal state (done, cancelled, expired, stopped) and cannot be assigned."""
+
+
+class KeyConflict(Exception):
+    """An idempotency key was reused for a different tool or different arguments. A caller bug."""
