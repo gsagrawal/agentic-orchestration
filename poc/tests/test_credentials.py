@@ -1,6 +1,7 @@
 """Credentials: code can *use* a credential without being able to *read* it."""
 import json
 import re
+import time
 
 from agent_network_proxy.registry import Caller
 from conftest import AUDIT_LOG, STATE, STUB_LOG, fetch, lines, py, sh
@@ -144,3 +145,26 @@ def test_an_empty_secret_denies_instead_of_corrupting_responses(proxied):
     assert "HTTPError 500" in fetch(ctl, sbx, GITHUB).stdout
     assert len(lines(STUB_LOG)) == before
     assert lines(AUDIT_LOG)[-1]["reason"] == "internal error"
+
+
+def test_a_response_the_proxy_cannot_decode_is_not_passed_through(proxied):
+    # If the body cannot be decoded, it cannot be scrubbed; after a credential swap that must fail closed.
+    ctl, sbx = proxied()
+    out = ctl.exec(sbx, ["python3", "-c", "import urllib.request as u\n"
+                         "try: print(u.urlopen(u.Request('https://api.github.test/weird', headers={'Authorization': 'Bearer placeholder-github-token'}), timeout=8).read())\n"
+                         "except Exception as e: print(repr(e))"]).stdout
+    assert REAL_A not in out and "HTTPError 500" in out
+
+
+def test_the_stub_can_restart_without_breaking_the_proxy(proxied):
+    import subprocess as sp
+    ctl, sbx = proxied()
+    assert fetch(ctl, sbx, GITHUB).stdout.startswith("200 ")
+    name = sp.run(["docker", "ps", "--filter", "label=com.docker.compose.service=stub", "--format", "{{.Names}}"],
+                  capture_output=True, text=True).stdout.split()[0]
+    sp.run(["docker", "restart", name], check=True, capture_output=True)
+    for _ in range(30):                                  # wait until it is listening again
+        if sp.run(["docker", "inspect", "-f", "{{.State.Health.Status}}", name], capture_output=True, text=True).stdout.strip() == "healthy":
+            break
+        time.sleep(0.5)
+    assert fetch(ctl, sbx, GITHUB).stdout.startswith("200 ")      # the proxy still trusts the restarted stub

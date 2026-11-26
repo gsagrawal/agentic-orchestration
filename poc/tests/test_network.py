@@ -654,3 +654,36 @@ def test_the_ownership_marker_is_outside_the_sandbox(make_sandbox):
     ctl.stop(sbx)
     resumed = ctl.create(sbx.workdir, sbx.caller)            # the session can resume: the marker was not in reach
     ctl.stop(resumed)
+
+
+def test_reap_recovers_even_from_a_corrupt_registry(proxied):
+    ctl, sbx = proxied()
+    path = proxied.registry.path
+    good = path.read_text()
+    path.write_text("{ corrupt")
+    try:
+        ctl.reap()                                       # crash recovery must work exactly when the state is damaged
+        assert subprocess.run(["docker", "inspect", sbx.name], capture_output=True).returncode != 0
+        assert proxied.registry.lookup(sbx.ip) is None   # and it left a readable registry behind
+    finally:
+        if path.read_text() == "{ corrupt":              # a failing test must not leave shared state broken for the rest
+            path.write_text(good)
+
+
+def test_a_command_killed_by_the_sandbox_deadline_says_so(tmp_path):
+    from sandbox_controller import Limits, SandboxController
+    ctl = SandboxController()
+    sbx = ctl.create(tmp_path / "dl", limits=Limits(deadline_s=2))
+    try:
+        result = ctl.exec(sbx, ["sleep", "20"], timeout_s=30)
+        assert result.exit_code != 0 and not result.timed_out
+        assert result.sandbox_expired                    # not mistaken for the command's own failure
+    finally:
+        ctl.stop(sbx)
+
+
+def test_a_query_is_forwarded_byte_for_byte_apart_from_the_placeholder(proxied):
+    ctl, sbx = proxied()
+    before = len(lines(STUB_LOG))
+    fetch(ctl, sbx, GITHUB + "?flag&q=a%20b&access_token=placeholder-github-token&z=%2B")
+    assert lines(STUB_LOG)[before]["path"] == f"/user?flag&q=a%20b&access_token={SECRET}&z=%2B"

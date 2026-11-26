@@ -20,7 +20,10 @@ OUT = Path("/stub")
 
 
 def make_cert() -> None:
-    """Self-signed cert for HOST; the public part is shared so the proxy can verify its upstream."""
+    """Self-signed cert for HOST; the public part is shared so the proxy can verify its upstream. Created once and
+    kept: the proxy trusts this exact certificate, so a stub restart must not change it."""
+    if (OUT / "cert.pem").exists() and (OUT / "key.pem").exists():
+        return
     key = ec.generate_private_key(ec.SECP256R1())
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, HOST)])
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -29,8 +32,9 @@ def make_cert() -> None:
             .not_valid_after(now + datetime.timedelta(days=30))
             .add_extension(x509.SubjectAlternativeName([x509.DNSName(HOST)]), critical=False)
             .sign(key, hashes.SHA256()))
-    Path("/tmp/key.pem").write_bytes(key.private_bytes(
+    (OUT / "key.pem").write_bytes(key.private_bytes(
         serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+    (OUT / "key.pem").chmod(0o600)
     (OUT / "cert.pem").write_bytes(cert.public_bytes(serialization.Encoding.PEM))
 
 
@@ -58,6 +62,13 @@ class Handler(BaseHTTPRequestHandler):
             f.write(json.dumps(record) + "\n")
         if self.path == "/headers":
             return self._send(b"hello")
+        if self.path == "/weird":                         # a body in a content-coding the proxy cannot decode
+            self.send_response(200)
+            self.send_header("Content-Encoding", "x-custom")
+            body = headers.get("Authorization", "").encode()
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            return self.wfile.write(body)
         if self.path == "/encoded":                       # echoes the credential in forms a plain search would miss
             credential = headers.get("Authorization", "").split(None, 1)[-1]
             body = json.dumps({"blob": credential, "b64": base64.b64encode(credential.encode()).decode()}).encode()
@@ -76,7 +87,7 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     make_cert()
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ctx.load_cert_chain(OUT / "cert.pem", "/tmp/key.pem")
+    ctx.load_cert_chain(OUT / "cert.pem", OUT / "key.pem")
     server = HTTPServer(("0.0.0.0", 443), Handler)
     server.socket = ctx.wrap_socket(server.socket, server_side=True)
     print(f"stub listening on :443 as {HOST}", file=sys.stderr, flush=True)

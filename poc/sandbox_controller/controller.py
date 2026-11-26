@@ -53,6 +53,7 @@ class ExecResult:
     timed_out: bool
     duration_s: float
     truncated: bool = False
+    sandbox_expired: bool = False    # the sandbox's own deadline passed while the command ran: not the command's failure
 
 
 class SandboxError(RuntimeError):
@@ -69,6 +70,7 @@ class Sandbox:
     workdir: Path
     limits: Limits
     caller: Caller | None = None
+    expires_at: float = float("inf")    # time.monotonic() at which the container exits by itself (its deadline)
     ip: str | None = None           # its address on its own private network (proxied sandboxes only)
     network: str | None = None
     alive: bool = True       # False as soon as stop() is requested: no more commands
@@ -129,6 +131,7 @@ class SandboxController:
                 raise SandboxError(f"{exc}; ALSO cleaning up {name} (network {sandbox.network}) failed: {cleanup}. "
                                    "Run reap() to remove it.") from exc
             raise
+        sandbox.expires_at = time.monotonic() + limits.deadline_s
         if caller:
             self._by_session[caller.key] = sandbox
         return sandbox
@@ -214,22 +217,25 @@ class SandboxController:
         """Remove every sandbox and sandbox network this label owns, and forget every registered caller:
         recovery after a crash. Keeps going past a failure and raises the first one at the end."""
         errors: list[Exception] = []
+
+        def attempt(step, *args, **kwargs):
+            try:
+                return step(*args, **kwargs)
+            except Exception as exc:  # noqa: BLE001 - collected; recovery keeps going
+                errors.append(exc)
+                return None
+
         if self.proxy:
-            self.proxy.registry.clear()             # first, before anything that can fail: stop trusting every address
-        ids = self._docker(["ps", "-aq", "--filter", f"label={LABEL}"], "list sandboxes").split()
+            attempt(self.proxy.registry.clear)      # first, before anything that can fail: stop trusting every address
+        ids = (attempt(self._docker, ["ps", "-aq", "--filter", f"label={LABEL}"], "list sandboxes") or "").split()
         if ids:
-            subprocess.run([self.docker, "kill", *ids], capture_output=True)
+            attempt(subprocess.run, [self.docker, "kill", *ids], capture_output=True)
         for container in ids:
-            try:
-                self._wait_until_gone(container)
-            except SandboxError as exc:
-                errors.append(exc)
-        for net in self._docker(["network", "ls", "-q", "--filter", f"label={LABEL}", "--format", "{{.Name}}"],
-                                "list networks").split():
-            try:
-                self._remove_network(net)
-            except SandboxError as exc:
-                errors.append(exc)
+            attempt(self._wait_until_gone, container)
+        networks = attempt(self._docker, ["network", "ls", "-q", "--filter", f"label={LABEL}", "--format", "{{.Name}}"],
+                           "list networks") or ""
+        for net in networks.split():
+            attempt(self._remove_network, net)
         self._by_session.clear()
         if errors:
             raise errors[0]
@@ -388,9 +394,10 @@ class SandboxController:
             with contextlib.suppress(Exception):   # the container is already gone; leftover cleanup is retried later
                 self.stop(sandbox)
             raise SandboxGone(f"{sandbox.name} is gone (deadline reached or killed); the command was not started")
+        expired = not timed_out and proc.returncode != 0 and time.monotonic() >= sandbox.expires_at - 0.5
         return ExecResult(exit_code=proc.returncode, stdout=out.text(), stderr=err.text(),
                           timed_out=timed_out, duration_s=time.monotonic() - start,
-                          truncated=out.truncated or err.truncated)
+                          truncated=out.truncated or err.truncated, sandbox_expired=expired)
 
     def _vanished(self, sandbox: Sandbox, stderr: str) -> bool:
         """`docker exec` could not start the command because the container is not running. The stderr text

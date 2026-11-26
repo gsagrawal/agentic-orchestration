@@ -9,7 +9,7 @@ containers. Design context: [../docs/service-architecture.md](../docs/service-ar
 ```bash
 pip install pytest      # the only host dependency besides Docker and Python 3.10+
 make demo               # scripted agent: pandoc, a credentialed call, a denied call, an escape attempt
-make test               # 105 tests, ~2 min
+make test               # 110 tests, ~2 min
 make bench              # cold start, 50 runs per configuration
 make down               # stop the proxy and stub
 ```
@@ -76,6 +76,9 @@ Not present at all: session-manager, ingress, auth, llm-gateway, object store, r
 | Scrubbing leaves repeated headers and HEAD responses intact | `test_response_scrubbing_keeps_headers_intact` |
 | The leak detector itself works (no vacuous "not found") | `test_the_leak_detector_detects_a_planted_leak` |
 | Registry: no lost updates, no stale reads, a wrongly shaped file is an error | `tests/test_registry.py` |
+| `reap()` recovers even from a corrupt registry | `test_reap_recovers_even_from_a_corrupt_registry`, `test_reap_distrusts_every_address_even_if_the_daemon_is_down` |
+| A command killed by the sandbox's own deadline says so | `test_a_command_killed_by_the_sandbox_deadline_says_so` |
+| A query is forwarded byte for byte; an undecodable response is refused; a stub restart does not break the proxy | `test_a_query_is_forwarded_byte_for_byte_apart_from_the_placeholder`, `test_a_response_the_proxy_cannot_decode_is_not_passed_through`, `test_the_stub_can_restart_without_breaking_the_proxy` |
 | Two controllers cannot both win one session, and the loser keeps no sandbox; a failed fence leaves no claim; a failed create says what it left behind | `test_two_controllers_racing_for_one_session_cannot_both_win`, `test_a_controller_that_loses_the_fence_race_does_not_keep_its_sandbox`, `test_a_failed_fence_does_not_leave_its_claim_behind`, `test_a_create_that_fails_and_cannot_clean_up_says_what_it_left_behind` |
 | A work dir belongs to one session; its marker is not followed | `test_a_workdir_belongs_to_one_session_and_its_marker_is_not_followed` |
 | Basic-auth placeholders are swapped and an echoed Basic header is scrubbed; unswappable ones (path, body, query name) are refused | `test_basic_auth_placeholders_are_swapped_too`, `test_an_echoed_basic_credential_is_scrubbed_too`, `test_a_placeholder_where_it_cannot_be_swapped_is_refused_not_forwarded`, `test_a_placeholder_in_a_query_parameter_name_is_refused` |

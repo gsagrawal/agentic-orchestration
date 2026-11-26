@@ -95,7 +95,7 @@ class AgentExecutor:
             except SandboxGone:
                 continue
             return {"exit_code": r.exit_code, "stdout": r.stdout, "stderr": r.stderr,
-                    "timed_out": r.timed_out, "truncated": r.truncated, "duration_s": round(r.duration_s, 3)}
+                    "timed_out": r.timed_out, "sandbox_expired": r.sandbox_expired, "truncated": r.truncated, "duration_s": round(r.duration_s, 3)}
         return {"error": "sandbox kept disappearing"}
 
     def _log(self, caller: Caller, step: int, call: ToolCall, result: dict) -> dict:

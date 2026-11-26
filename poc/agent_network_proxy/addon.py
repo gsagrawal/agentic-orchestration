@@ -133,13 +133,12 @@ class Gatekeeper:
         # Compute every rewrite first, so nothing can fail between the audit line and the request being released.
         swapped = [(k, swap(v, placeholder, real)) for k, v in flow.request.headers.fields]
         echoes = [new for (_, old), (_, new) in zip(flow.request.headers.fields, swapped) if new != old]   # e.g. a Basic blob
-        pairs = flow.request.query.items(multi=True)
-        query = ([(k, v.replace(grant["placeholder"], secret)) for k, v in pairs]
-                 if any(grant["placeholder"] in value for _, value in pairs) else None)
+        path, _, raw_query = flow.request.path.partition("?")      # the raw text: every other byte is left as the client sent it
+        query = raw_query.replace(grant["placeholder"], secret) if grant["placeholder"] in raw_query else None
         self._audit(flow, caller, "allow", None, grant["credential"], None)   # before the credential is used
         flow.request.headers.fields = tuple(swapped)
         if query is not None:
-            flow.request.query = query
+            flow.request.path = f"{path}?{query}"
         flow.metadata.update(caller=caller, credential=grant["credential"], secret=secret, echoes=echoes)
 
     @fail_closed
@@ -157,7 +156,10 @@ class Gatekeeper:
                 data = data.replace(needle, REDACTED)
             return data
         flow.response.headers.fields = tuple((k, scrub(v)) for k, v in flow.response.headers.fields)
-        body = flow.response.get_content(strict=False)
+        try:
+            body = flow.response.get_content(strict=True)     # undecodable means unscrubbable: refuse, do not guess
+        except ValueError as exc:
+            raise ValueError(f"response body cannot be decoded, so it cannot be scrubbed: {exc}") from exc
         if body and any(n in body for n in needles):
             flow.response.set_content(scrub(body))
         self._audit(flow, flow.metadata["caller"], "result", None, flow.metadata["credential"],

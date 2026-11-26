@@ -65,13 +65,19 @@ class Registry:
         return data
 
     @contextlib.contextmanager
-    def transaction(self):
+    def transaction(self, repair: bool = False):
         """Hold the exclusive lock, yield the registry data to inspect and change, and write it back atomically
         when the block ends normally. An exception inside the block writes nothing. Everything that must be
-        decided and recorded together (the controller's fence) happens inside one of these."""
+        decided and recorded together (the controller's fence) happens inside one of these. With `repair`, an
+        unreadable file is replaced by an empty registry instead of raising: only for crash recovery."""
         with open(self.path.with_name(self.path.name + ".lock"), "a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            data = self._read()
+            try:
+                data = self._read()
+            except RegistryError:
+                if not repair:
+                    raise
+                data = {"callers": {}, "epochs": {}}
             yield data
             fd, tmp = tempfile.mkstemp(dir=self.path.parent)
             try:
@@ -123,8 +129,10 @@ class Registry:
                 if f"{c['tenant']}/{c['session']}" == key]
 
     def clear(self) -> None:
-        """Forget every caller (epochs are kept, so old executors stay fenced)."""
-        self._update(lambda data: data.update(callers={}))
+        """Forget every caller (epochs are kept, so old executors stay fenced). Repairs an unreadable file: this is
+        what crash recovery uses, and it must work exactly when the state is damaged."""
+        with self.transaction(repair=True) as data:
+            data["callers"] = {}
 
     # -- proxy side --------------------------------------------------------
 

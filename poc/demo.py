@@ -50,7 +50,7 @@ def main() -> None:
     workdir = ROOT / ".work" / caller.session
 
     for r in executor.run(caller, SCRIPT, workdir):
-        print(f"\n[step {r['step']}] {r['tool']}: {r['code'].strip().splitlines()[0][:70]}")
+        print(f"\n[step {r['step']}] {r['tool']}: {(r['code'].strip().splitlines() or [''])[0][:70]}")
         for key in ("error", "stdout", "stderr"):
             text = r["result"].get(key)
             if text:
