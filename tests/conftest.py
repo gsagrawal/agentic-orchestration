@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from orchestrator import db
@@ -15,9 +17,6 @@ def conn(db_path):
     c = db.connect(db_path)
     yield c
     c.close()
-
-
-import json
 
 
 @pytest.fixture

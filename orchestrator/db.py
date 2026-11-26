@@ -49,7 +49,7 @@ CREATE TRIGGER IF NOT EXISTS session_log_no_delete BEFORE DELETE ON session_log
 BEGIN SELECT RAISE(ABORT, 'session_log is append-only'); END;
 
 -- Executors announce themselves here; the manager picks from this list.
--- last_heartbeat is refreshed by the executor (step 5).
+-- last_heartbeat is refreshed by the executor's loop.
 CREATE TABLE IF NOT EXISTS executors (
     id             TEXT PRIMARY KEY,
     last_heartbeat REAL NOT NULL

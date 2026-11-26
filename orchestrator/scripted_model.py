@@ -16,7 +16,7 @@ class ScriptedModel:
         script = agent["script"]
         position = sum(1 for m in messages if m["role"] == "assistant")
         if position >= len(script):
-            if not agent.get("loop"):
+            if not agent.get("loop") or not script:  # nothing to loop over: finish
                 return {"do": "finish"}
             position %= len(script)
         return script[position]

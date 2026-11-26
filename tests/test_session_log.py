@@ -1,5 +1,6 @@
 """Fencing at the session log: a stale epoch can never append."""
 
+import re
 import sqlite3
 import threading
 import time
@@ -150,3 +151,10 @@ def test_concurrent_appends_racing_a_reassignment_never_write_out_of_epoch_order
     epochs = [e["epoch"] for e in session_log.read(setup, "s1")]
     assert epochs == sorted(epochs)
     assert epochs.count(2) == 20
+
+
+def test_python_state_lists_match_the_schema_check_constraint(conn):
+    """The state names live in the CHECK constraint and in state_table; they must agree."""
+    sql = conn.execute("SELECT sql FROM sqlite_master WHERE name = 'sessions'").fetchone()[0]
+    in_schema = set(re.search(r"state IN \(([^)]*)\)", sql).group(1).replace("'", "").replace("\n", "").replace(" ", "").split(","))
+    assert in_schema == set(state_table.LIVE_STATES) | set(state_table.TERMINAL_STATES)

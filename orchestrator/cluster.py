@@ -5,6 +5,7 @@ import os
 import signal
 import threading
 import time
+from multiprocessing.process import BaseProcess
 from pathlib import Path
 
 from .agent_store import AgentStore
@@ -22,7 +23,8 @@ class Cluster:
         self.tool_delay, self.heartbeat_interval = tool_delay, heartbeat_interval
         self.reconcile_interval = reconcile_interval
         self._initial_executors = executors
-        self.workers: dict[str, object] = {}
+        self.workers: dict[str, BaseProcess] = {}
+        self._thread: threading.Thread | None = None
         self._spawned = 0
         self._stop = threading.Event()
         self.manager_error: Exception | None = None
@@ -48,7 +50,7 @@ class Cluster:
 
     def __exit__(self, *exc):
         self._stop.set()
-        if hasattr(self, "_thread"):
+        if self._thread:
             self._thread.join()
         for proc in self.workers.values():
             proc.kill()
@@ -57,9 +59,7 @@ class Cluster:
     def _reconcile_loop(self):
         manager = SessionManager(self.db_path, AgentStore(self.agents_path), self.config)
         try:
-            while not self._stop.is_set():
-                manager.reconcile_once()
-                self._stop.wait(self.reconcile_interval)
+            manager.run_forever(self._stop, self.reconcile_interval)
         except Exception as e:  # surfaced by check_manager
             self.manager_error = e
 

@@ -87,3 +87,9 @@ def test_ended_session_still_holding_an_executor_is_reported(conn, db_path):
     finished_session(conn, db_path)
     conn.execute("UPDATE sessions SET executor_id = 'ex-1' WHERE id = 's1'")
     assert any("still holds executor" in p for p in invariants.check(conn))
+
+
+def test_step_count_that_disagrees_with_the_log_is_reported(conn, db_path):
+    finished_session(conn, db_path)
+    conn.execute("UPDATE sessions SET step_count = 3 WHERE id = 's1'")
+    assert any("step_count is 3 but the log has 1" in p for p in invariants.check(conn))

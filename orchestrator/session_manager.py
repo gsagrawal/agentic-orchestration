@@ -8,6 +8,7 @@ activities are also at-least-once.)
 The manager only READS budget status (tenant_budget); it never sums usage.
 """
 
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -93,7 +94,8 @@ class SessionManager:
                 return  # no live executor; the sessions are retried on the next pass
             state_table.assign_if_needed(self.conn, session_id, executor_id, alive_since)
 
-    def run_forever(self, interval: float = 0.05) -> None:
-        while True:
+    def run_forever(self, stop: threading.Event, interval: float = 0.05) -> None:
+        """Reconcile every `interval` seconds until `stop` is set."""
+        while not stop.is_set():
             self.reconcile_once()
-            time.sleep(interval)
+            stop.wait(interval)

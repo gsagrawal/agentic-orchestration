@@ -5,9 +5,11 @@
   3. no log entry or effect carries a stale epoch: epochs never go backwards within a
      session, none exceeds the session's current epoch, and every effect committed while
      its caller's epoch was still the session's current one
-  4. each session's log is well formed: every tool call has exactly one outcome
-     (result or unknown), recorded for the same step, and steps count 1, 2, 3, ...
-  5. a stopped session says why, and no session exceeded its step cap
+  4. each session's log is well formed: an outcome (result or unknown) always answers the
+     call just before it, for the same step, and no new call is decided while one is open.
+     A call may still be open at the very end: the manager can stop a run mid-call
+  5. the manager's step_count equals the number of tool calls in the log, and no session
+     exceeded its step cap; a stopped session says why
 """
 
 import sqlite3
@@ -30,7 +32,11 @@ def check(conn: sqlite3.Connection) -> list[str]:
         if s["step_count"] > s["step_cap"]:
             problems.append(f"{sid}: {s['step_count']} steps exceeds the cap of {s['step_cap']}")
         log = session_log.read(conn, sid)
-        effect_epochs = [r[0] for r in conn.execute("SELECT epoch FROM effects WHERE session_id = ? ORDER BY id", (sid,))]
+        calls_in_log = sum(1 for e in log if e["kind"] == "model" and e["payload"]["action"]["do"] == "tool")
+        if calls_in_log != s["step_count"]:
+            problems.append(f"{sid}: step_count is {s['step_count']} but the log has {calls_in_log} tool calls")
+        effect_epochs = [r[0] for r in conn.execute(
+            "SELECT epoch FROM effects WHERE session_id = ? ORDER BY id", (sid,))]
         problems += _epoch_problems(sid, s["epoch"], log, effect_epochs)
         problems += _log_shape_problems(sid, log)
     for r in conn.execute("SELECT session_id, step, epoch, session_epoch FROM effects WHERE epoch != session_epoch"):

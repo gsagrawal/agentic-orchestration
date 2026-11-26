@@ -1,8 +1,7 @@
-"""The session state table (owned by the session manager).
+"""The session state table (owned by the session manager): every query and update on it.
 
-Step 1 only has what the log tests need: create a session, read it, and
-assign it (which bumps the epoch). Admission, quotas and the reconciler
-come in later steps.
+Who writes what: the manager admits sessions, assigns them, and ends overdue ones; an executor
+releases a session it holds (done, waiting or stopped), fenced by its epoch.
 """
 
 import sqlite3
@@ -31,10 +30,11 @@ def get_session(conn: sqlite3.Connection, session_id: str) -> sqlite3.Row:
 
 
 def assign(conn: sqlite3.Connection, session_id: str, executor_id: str) -> int:
-    """Give the session to an executor and return the new epoch.
+    """Give the session to an executor and return the new epoch, unconditionally.
 
     The bump is what fences the previous holder: its epoch no longer matches.
-    A session in a terminal state is never reassigned.
+    A session in a terminal state is never reassigned. The reconciler uses
+    assign_if_needed() instead; this plain form is for setting up a situation by hand.
     """
     with write_txn(conn):
         row = conn.execute(

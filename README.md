@@ -8,6 +8,8 @@ choice, with the alternative rejected: `DESIGN_CHOICES.md`.
 tool call, the session resumes on another executor, the old executor can no longer change
 anything, and no tool effect happens twice.
 
+Requirements: Python (written for 3.10+, run only on 3.13) and pytest. Nothing else; SQLite ships with Python.
+
 ```
 make test    # about 30 s; includes real kill -9 and a chaos test
 make demo    # 12 sessions, one executor killed mid-run, outcome and invariants printed

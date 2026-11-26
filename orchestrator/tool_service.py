@@ -23,6 +23,7 @@ from typing import Callable
 from .db import connect, write_txn
 from .errors import KeyConflict, StaleEpoch, UnknownSession
 from .fake_tools import Tool
+from .fault import no_fault
 
 
 def idempotency_key(session_id: str, step: int) -> str:
@@ -30,12 +31,12 @@ def idempotency_key(session_id: str, step: int) -> str:
 
 
 class ToolService:
-    def __init__(self, db_path: str, tools: dict[str, Tool], fault_hook: Callable[[str], None] | None = None):
+    def __init__(self, db_path: str, tools: dict[str, Tool], fault_hook: Callable[[str], None] = no_fault):
         """`fault_hook(point)` is called at "before_effect" and "after_effect" so tests
         can kill the process, or change the epoch, at exactly that moment."""
         self._conn = connect(db_path)
         self._tools = tools
-        self._fault = fault_hook or (lambda point: None)
+        self._fault = fault_hook
 
     def is_idempotent(self, tool_name: str) -> bool:
         return self._tools[tool_name].idempotent
@@ -113,7 +114,7 @@ class ToolService:
 
 
 def effect_counts(conn: sqlite3.Connection, session_id: str | None = None) -> dict[tuple[str, int], int]:
-    """Ledger rows per (session, step). Any count above 1 is a double effect. For tests."""
+    """Ledger rows per (session, step). Any count above 1 is a double effect. Used by tests and invariants."""
     sql = "SELECT session_id, step, COUNT(*) AS n FROM effects"
     params: tuple = ()
     if session_id is not None:

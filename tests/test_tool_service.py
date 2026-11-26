@@ -7,6 +7,7 @@ import pytest
 from orchestrator import state_table
 from orchestrator.errors import KeyConflict, StaleEpoch
 from orchestrator.fake_tools import default_tools
+from orchestrator.fault import no_fault
 from orchestrator.tool_service import ToolService, effect_counts
 
 
@@ -16,7 +17,7 @@ def epoch(conn):
     return state_table.assign(conn, "s1", "ex-A")
 
 
-def make_service(db_path, hook=None):
+def make_service(db_path, hook=no_fault):
     return ToolService(db_path, default_tools(), fault_hook=hook)
 
 
@@ -88,7 +89,7 @@ def test_after_fencing_the_new_executor_still_gets_exactly_one_effect(conn, db_p
 
 
 def test_non_idempotent_crash_between_effect_and_result_leaves_effect_without_result(conn, db_path, epoch):
-    """The window the executor must handle (step 6): effect committed, result never recorded."""
+    """The window the executor must handle on resume: effect committed, result never recorded."""
     class Died(Exception):
         pass
 
@@ -163,7 +164,7 @@ def test_non_idempotent_result_is_recorded_even_if_the_epoch_changed_in_the_wind
 
 def test_known_limit_call_alone_reruns_a_non_idempotent_tool_that_has_no_stored_result(conn, db_path, epoch):
     """Not a feature: pins the contract that the EXECUTOR must not call again after a crash
-    in the window (step 6). The service on its own is not safe here (DESIGN_CHOICES #17)."""
+    in the window. The service on its own is not safe here (DESIGN_CHOICES #17)."""
     class Died(Exception):
         pass
 

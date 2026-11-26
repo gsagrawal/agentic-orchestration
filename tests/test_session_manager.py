@@ -2,6 +2,7 @@
 
 import json
 import threading
+import time
 
 import pytest
 
@@ -10,6 +11,7 @@ from orchestrator.agent_store import AgentStore
 from orchestrator.errors import BudgetExceeded, QuotaExceeded, UnknownAgent
 from orchestrator.executor import Executor
 from orchestrator.session_manager import ManagerConfig, SessionEngine, SessionManager
+from tests.helpers import wait_until
 
 
 NOW = 1000.0  # the fake clock every test manager reads
@@ -150,3 +152,21 @@ def test_reconcile_skips_a_session_that_ended_between_listing_and_assigning(conn
     mgr.reconcile_once()
     assert mgr.get_status(ended)["state"] == "cancelled"
     assert mgr.get_status(live)["state"] == "running"
+
+
+def test_run_forever_reconciles_until_stopped(conn, db_path, agents_path):
+    state_table.heartbeat(conn, "ex-1", time.time())
+    sid = SessionManager(db_path, AgentStore(agents_path)).start_session("t", "two-tools")
+    stop = threading.Event()
+
+    def reconcile_loop():  # a SQLite connection belongs to one thread, so build the manager here
+        SessionManager(db_path, AgentStore(agents_path), ManagerConfig(lease_seconds=60)).run_forever(stop, 0.01)
+
+    thread = threading.Thread(target=reconcile_loop)
+    thread.start()
+    try:
+        wait_until(lambda: state_table.get_session(conn, sid)["state"] == "running", "the session to be assigned", 10)
+    finally:
+        stop.set()
+        thread.join(timeout=5)
+    assert not thread.is_alive()
