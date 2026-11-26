@@ -9,7 +9,7 @@ containers. Design context: [../docs/service-architecture.md](../docs/service-ar
 ```bash
 pip install pytest      # the only host dependency besides Docker and Python 3.10+
 make demo               # scripted agent: pandoc, a credentialed call, a denied call, an escape attempt
-make test               # 101 tests, ~2 min
+make test               # 105 tests, ~2 min
 make bench              # cold start, 50 runs per configuration
 make down               # stop the proxy and stub
 ```
@@ -105,7 +105,7 @@ difference to start time. These are local-image numbers: no pull, no Kubernetes,
 **Credentials and the proxy**
 - **API-tool calls from the executor** (explicit session id + epoch, the proxy's other identification path) are not built. Only calls from a sandbox, identified by address, exist.
 - Only the proxy-configured mechanism works. Transparent interception for hardcoded endpoints is not built; such a tool has no route at all. Client-certificate (mTLS) tools were not tested; only certificate pinning was. gRPC and raw TCP are not handled (PROXY-1).
-- Placeholder swap covers header values (including inside HTTP Basic credentials, which is how git sends a token) and query values. A placeholder in the URL path or in a request body cannot be swapped, so such a request is **refused** (`placeholder in an unsupported position`) instead of going out with a fake token. Cookies and other encodings are not handled. Response scrubbing is exact-match only: an encoded or transformed echo of a secret gets through (AUDIT-1).
+- Placeholder swap covers header values (including inside HTTP Basic credentials, which is how git sends a token) and query values. A placeholder in the URL path or in a request body cannot be swapped, so such a request is **refused** (`placeholder in an unsupported position`) instead of going out with a fake token. Cookies and other encodings are not handled. Response scrubbing removes the secret, its base64 and what the proxy rewrote, but a destination that reflects a credential through further transformations is not defeated (AUDIT-1); it is defence in depth for a trusted destination, and the real control is to grant only destinations that do not echo credentials.
 - The proxy trusts only the stub's self-signed cert upstream, has one CA for all tenants, and keeps its key on disk (D21, D22).
 - Rate limit is in the memory of one proxy (N replicas would allow N times the limit) and counts requests, not `CONNECT`s, so a sandbox can open tunnels to a granted host without being limited.
 - The state directories are meant for a single-user machine such as a laptop. The registry directory is never world-writable (it is the proxy's trust root). The audit, stub and proxy-conf directories are handed to uid 65534 with mode 0750 when `stack.py` runs as root, but **0777 when it runs as a normal user** (chown is not allowed), because the containers write them as uid 65534. In that case, on a shared host, another user could rewrite the audit log or replace the proxy CA certificate that is mounted into every sandbox.

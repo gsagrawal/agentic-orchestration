@@ -21,7 +21,7 @@ from pathlib import Path
 from agent_network_proxy.registry import Caller, Registry, Superseded
 
 LABEL = "agent-sandbox=1"
-WORKDIR_MARKER = ".agent-sandbox-workdir"   # says "a sandbox controller created this directory, for this session"
+WORKDIR_OWNER_SUFFIX = ".sandbox-owner"      # a file NEXT TO the work dir (outside the mounted tree): who it was created for
 PENDING_TTL_S = 60   # how long a claim on a session, made before its sandbox exists, protects it
 
 
@@ -135,21 +135,28 @@ class SandboxController:
 
     @staticmethod
     def _check_workdir(workdir: Path, owner: str) -> None:
-        """A directory that already holds files is only reused if a controller marked it for this same session.
-        The marker is inside the sandbox's own /work, so it is untrusted: it must be a regular file, not a symlink
-        (which would make the host follow it), and it names the owner so one session cannot mount another's files."""
-        if not (workdir.exists() and any(workdir.iterdir())):
-            return
-        marker = workdir / WORKDIR_MARKER
-        if marker.is_symlink() or not marker.is_file():
-            raise SandboxError(f"workdir {workdir} is not dedicated to a sandbox: it exists, is not empty, and was not "
-                               "created by a sandbox controller (its mode would be changed to 0777 and it would be mounted writable)")
-        if marker.read_text() != owner:
-            raise SandboxError(f"workdir {workdir} belongs to {marker.read_text()!r}, not {owner!r}")
+        """A work dir is reused only by the session it was created for. The ownership marker is a file next to
+        the directory, so nothing running in the sandbox can delete or forge it; it must be a regular file (a
+        symlink would make the host follow it) and names the owner, so one session cannot mount another's files.
+        A directory with no marker is acceptable only if it is empty or new."""
+        marker = SandboxController._owner_file(workdir)
+        not_dedicated = SandboxError(f"workdir {workdir} is not dedicated to a sandbox: it exists, is not empty, and was not "
+                                     "created by a sandbox controller (its mode would be changed to 0777 and it would be mounted writable)")
+        if marker.is_symlink() or (marker.exists() and not marker.is_file()):
+            raise not_dedicated
+        if marker.exists():
+            if marker.read_text() != owner:
+                raise SandboxError(f"workdir {workdir} belongs to {marker.read_text()!r}, not {owner!r}")
+        elif workdir.exists() and any(workdir.iterdir()):
+            raise not_dedicated
+
+    @staticmethod
+    def _owner_file(workdir: Path) -> Path:
+        return workdir.with_name(workdir.name + WORKDIR_OWNER_SUFFIX)
 
     @staticmethod
     def _mark_workdir(workdir: Path, owner: str) -> None:
-        marker = workdir / WORKDIR_MARKER
+        marker = SandboxController._owner_file(workdir)
         if not marker.is_symlink() and marker.exists():
             return                                   # a resumed session: already checked by _check_workdir
         fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
@@ -207,9 +214,9 @@ class SandboxController:
         """Remove every sandbox and sandbox network this label owns, and forget every registered caller:
         recovery after a crash. Keeps going past a failure and raises the first one at the end."""
         errors: list[Exception] = []
-        ids = self._docker(["ps", "-aq", "--filter", f"label={LABEL}"], "list sandboxes").split()
         if self.proxy:
-            self.proxy.registry.clear()             # first: stop trusting every address, including those of sandboxes already gone
+            self.proxy.registry.clear()             # first, before anything that can fail: stop trusting every address
+        ids = self._docker(["ps", "-aq", "--filter", f"label={LABEL}"], "list sandboxes").split()
         if ids:
             subprocess.run([self.docker, "kill", *ids], capture_output=True)
         for container in ids:

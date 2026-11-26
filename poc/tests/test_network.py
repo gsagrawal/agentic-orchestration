@@ -339,7 +339,9 @@ def test_a_websocket_upgrade_is_denied(proxied):
 
 def test_the_proxy_container_is_found_by_its_compose_labels(proxied):
     ctl, _ = proxied()
-    assert ctl._proxy_container() == "agentpoc-proxy-1"
+    label = subprocess.run(["docker", "inspect", "-f", '{{index .Config.Labels "com.docker.compose.service"}}',
+                            ctl._proxy_container()], capture_output=True, text=True).stdout.strip()
+    assert label == "proxy"          # whatever Compose called it, the container found is the proxy service
 
 
 def test_malformed_grants_are_a_sandbox_error_not_a_crash(tmp_path):
@@ -499,7 +501,7 @@ def test_the_same_epoch_can_be_retried_after_its_sandbox_expired(tmp_path):
     ctl.stop(second)
 
 
-def test_a_workdir_belongs_to_one_session_and_its_marker_is_not_followed(make_sandbox, tmp_path):
+def test_a_workdir_belongs_to_one_session(make_sandbox, tmp_path):
     import pytest
     from sandbox_controller import SandboxError
     ctl, mine = make_sandbox("shared", caller=Caller("s-a", "agent-no-net", "tenant-a", 1))
@@ -508,13 +510,13 @@ def test_a_workdir_belongs_to_one_session_and_its_marker_is_not_followed(make_sa
         ctl.create(mine.workdir, Caller("s-a", "agent-b", "tenant-b", 1))
     victim = tmp_path / "host-file"
     victim.write_text("x")
-    marker = mine.workdir / ".agent-sandbox-workdir"
-    marker.unlink()
-    marker.symlink_to(victim)                                                      # what a sandbox could do to its own work dir
+    owner = mine.workdir.with_name(mine.workdir.name + ".sandbox-owner")
+    owner.unlink()
+    owner.symlink_to(victim)                                                       # a marker that is a symlink is never followed
     before = victim.stat().st_mtime_ns
     with pytest.raises(SandboxError, match="not dedicated"):
         ctl.create(mine.workdir, Caller("s-a", "agent-no-net", "tenant-a", 1))
-    assert victim.stat().st_mtime_ns == before                                     # the host file was never touched
+    assert victim.stat().st_mtime_ns == before
 
 
 def test_basic_auth_placeholders_are_swapped_too(proxied):
@@ -628,3 +630,27 @@ def test_tenant_ids_cannot_collide_through_a_slash():
     assert Caller("c", "a", "a", 1).key != Caller("b/c", "a", "a", 1).key
     with pytest.raises(ValueError, match="tenant"):
         Caller("c", "agent", "a/b", 1)
+
+
+def test_reap_distrusts_every_address_even_if_the_daemon_is_down(proxied):
+    import pytest
+    ctl, sbx = proxied()
+    real = ctl.docker
+    ctl.docker = "/nonexistent/docker"
+    try:
+        with pytest.raises(OSError):
+            ctl.reap()
+        assert proxied.registry.lookup(sbx.ip) is None        # cleared first: the proxy stops trusting it regardless
+    finally:
+        ctl.docker = real
+        ctl.reap()
+
+
+def test_the_ownership_marker_is_outside_the_sandbox(make_sandbox):
+    # Whatever runs in /work must not be able to strand its own session by deleting the marker.
+    ctl, sbx = make_sandbox("owned", caller=Caller("s-own-" + uuid.uuid4().hex[:6], "agent-no-net", "tenant-a", 1))
+    assert not (sbx.workdir / ".agent-sandbox-workdir").exists()
+    ctl.exec(sbx, ["bash", "-c", "echo data > /work/keep.txt; rm -rf /work/.[!.]* /work/*.marker 2>/dev/null; echo data > /work/keep.txt"])
+    ctl.stop(sbx)
+    resumed = ctl.create(sbx.workdir, sbx.caller)            # the session can resume: the marker was not in reach
+    ctl.stop(resumed)

@@ -2,6 +2,7 @@
 so a test (or you) can see exactly what credential reached the destination.
 It also echoes the Authorization header back in the body, so the proxy's
 response scrubbing has something to scrub."""
+import base64
 import datetime
 import json
 import ssl
@@ -57,6 +58,10 @@ class Handler(BaseHTTPRequestHandler):
             f.write(json.dumps(record) + "\n")
         if self.path == "/headers":
             return self._send(b"hello")
+        if self.path == "/encoded":                       # echoes the credential in forms a plain search would miss
+            credential = headers.get("Authorization", "").split(None, 1)[-1]
+            body = json.dumps({"blob": credential, "b64": base64.b64encode(credential.encode()).decode()}).encode()
+            return self._send(body)
         body = json.dumps({"login": "octocat", "received_authorization": headers.get("Authorization")}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")

@@ -71,7 +71,7 @@ def test_audit_names_the_credential_and_never_holds_a_value(proxied):
     entry = [l for l in lines(AUDIT_LOG) if l["session"] == sbx.caller.session and l["decision"] == "allow"][-1]
     assert entry["credential"] == "github" and entry["tenant"] == "tenant-a"
     raw = AUDIT_LOG.read_text()
-    assert not any(v in raw for t in SECRETS.values() for v in t.values())
+    assert not any(v in raw for t in SECRETS.values() for v in t.values() if v)      # `if v`: one tenant's secret is deliberately empty
 
 
 def test_a_tool_that_pins_the_certificate_fails_closed_with_no_credential(proxied):
@@ -120,3 +120,27 @@ def test_one_env_var_cannot_stand_for_two_different_placeholders(tmp_path):
                                               Registry(tmp_path / "reg.json"), grants))
     with pytest.raises(SandboxError, match="GH_TOKEN"):
         ctl.create(tmp_path / "wd", Caller("s", "a", "t", 1))
+
+
+def test_encoded_echoes_of_the_credential_are_scrubbed(proxied):
+    import base64
+    ctl, sbx = proxied()
+    fetch_encoded = ("import urllib.request as u, sys\n"
+                     "print(u.urlopen(u.Request('https://api.github.test/encoded', headers={'Authorization': sys.argv[1]}), timeout=8).read().decode())")
+    bearer = ctl.exec(sbx, ["python3", "-c", fetch_encoded, "Bearer placeholder-github-token"]).stdout
+    basic_blob = base64.b64encode(b"x-access-token:placeholder-github-token").decode()
+    basic = ctl.exec(sbx, ["python3", "-c", fetch_encoded, f"Basic {basic_blob}"]).stdout
+    real_b64 = base64.b64encode(REAL_A.encode()).decode()                              # the secret, base64-encoded
+    real_blob = base64.b64encode(f"x-access-token:{REAL_A}".encode()).decode()         # the Basic credential without its scheme
+    assert REAL_A not in bearer and real_b64 not in bearer
+    assert real_blob not in basic and REAL_A not in basic
+    # Not covered, by design: a destination that reflects a credential through a further transformation
+    # (e.g. base64 of the Basic blob). Scrubbing is defence in depth for a trusted destination, not a guarantee.
+
+
+def test_an_empty_secret_denies_instead_of_corrupting_responses(proxied):
+    ctl, sbx = proxied(agent="agent-empty-secret", tenant="tenant-e")
+    before = len(lines(STUB_LOG))
+    assert "HTTPError 500" in fetch(ctl, sbx, GITHUB).stdout
+    assert len(lines(STUB_LOG)) == before
+    assert lines(AUDIT_LOG)[-1]["reason"] == "internal error"

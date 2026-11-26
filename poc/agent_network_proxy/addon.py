@@ -127,14 +127,19 @@ class Gatekeeper:
         if reason:
             return self._deny(flow, caller, reason)
         secret = json.loads((CONFIG / "secrets.json").read_text())[caller.tenant][grant["credential"]]
-        self._audit(flow, caller, "allow", None, grant["credential"], None)   # before the credential is used
+        if not secret or not grant["placeholder"]:
+            raise ValueError("empty secret or placeholder")       # an empty needle would corrupt every response
         placeholder, real = grant["placeholder"].encode(), secret.encode()
+        # Compute every rewrite first, so nothing can fail between the audit line and the request being released.
         swapped = [(k, swap(v, placeholder, real)) for k, v in flow.request.headers.fields]
         echoes = [new for (_, old), (_, new) in zip(flow.request.headers.fields, swapped) if new != old]   # e.g. a Basic blob
-        flow.request.headers.fields = tuple(swapped)
         pairs = flow.request.query.items(multi=True)
-        if any(grant["placeholder"] in value for _, value in pairs):      # touch the query only if it carries the placeholder
-            flow.request.query = [(k, v.replace(grant["placeholder"], secret)) for k, v in pairs]
+        query = ([(k, v.replace(grant["placeholder"], secret)) for k, v in pairs]
+                 if any(grant["placeholder"] in value for _, value in pairs) else None)
+        self._audit(flow, caller, "allow", None, grant["credential"], None)   # before the credential is used
+        flow.request.headers.fields = tuple(swapped)
+        if query is not None:
+            flow.request.query = query
         flow.metadata.update(caller=caller, credential=grant["credential"], secret=secret, echoes=echoes)
 
     @fail_closed
@@ -144,7 +149,9 @@ class Gatekeeper:
             return
         # What to remove: the secret itself, and every header value we rewrote (a Basic blob contains the secret
         # only in base64, which a plain search would miss when the destination echoes the header back).
-        needles = [secret.encode(), *flow.metadata.get("echoes", [])]
+        echoes = flow.metadata.get("echoes", [])
+        needles = [n for n in (secret.encode(), base64.b64encode(secret.encode()),
+                               *echoes, *(e.split(b" ", 1)[-1] for e in echoes)) if n]       # never an empty needle
         def scrub(data: bytes) -> bytes:
             for needle in needles:
                 data = data.replace(needle, REDACTED)
