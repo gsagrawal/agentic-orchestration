@@ -17,6 +17,8 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
     id            TEXT PRIMARY KEY,
     tenant        TEXT NOT NULL,
+    agent_id      TEXT,                       -- agent definition pinned at admission
+    agent_version INTEGER,
     state         TEXT NOT NULL DEFAULT 'created'
                   CHECK (state IN ('created','running','waiting',
                                    'done','cancelled','expired','stopped')),
