@@ -145,3 +145,46 @@ def test_concurrent_calls_with_the_same_key_give_one_effect(conn, db_path, epoch
     assert not errors
     assert results == [{"set": "k"}] * 6
     assert effect_counts(conn) == {("s1", 1): 1}
+
+
+def test_non_idempotent_result_is_recorded_even_if_the_epoch_changed_in_the_window(conn, db_path, epoch):
+    """The effect happened, so its result is recorded for the new holder to find (DESIGN_CHOICES #16)."""
+    new = []
+
+    def reassign_in_window(point):
+        if point == "after_effect":
+            new.append(state_table.assign(conn, "s1", "ex-B"))
+
+    svc = make_service(db_path, reassign_in_window)
+    result = svc.call("s1", 1, epoch, "send_email", {"to": "x"})
+    assert make_service(db_path).lookup("s1", 1, new[0]) == result
+    assert effect_counts(conn) == {("s1", 1): 1}
+
+
+def test_KNOWN_LIMIT_call_alone_reruns_a_non_idempotent_tool_that_has_no_stored_result(conn, db_path, epoch):
+    """Not a feature: pins the contract that the EXECUTOR must not call again after a crash
+    in the window (step 6). The service on its own is not safe here (DESIGN_CHOICES #17)."""
+    class Died(Exception):
+        pass
+
+    def die_after_effect(point):
+        if point == "after_effect":
+            raise Died
+
+    with pytest.raises(Died):
+        make_service(db_path, die_after_effect).call("s1", 1, epoch, "send_email", {"to": "x"})
+    make_service(db_path).call("s1", 1, epoch, "send_email", {"to": "x"})
+    assert effect_counts(conn) == {("s1", 1): 2}
+
+
+def test_tool_that_raises_leaves_no_effect_and_no_result(conn, db_path, epoch):
+    from orchestrator.fake_tools import Tool
+
+    def boom(args, effect_id):
+        raise RuntimeError("tool failed")
+
+    svc = ToolService(db_path, {"boom": Tool("boom", True, boom)})
+    with pytest.raises(RuntimeError):
+        svc.call("s1", 1, epoch, "boom", {})
+    assert effect_counts(conn) == {}
+    assert svc.lookup("s1", 1, epoch) is None
