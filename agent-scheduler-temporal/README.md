@@ -113,4 +113,40 @@ server, the workers and the client all compete; they are not capacity numbers.
 
 Produced by `make bench`; copied here unedited from the run that produced them.
 
-<<BENCH>>
+Machine: 4 vCPU, Intel(R) Xeon(R) Processor @ 2.10GHz; Python 3.13.18; dev server in-memory, one node.
+
+### Throughput (60 sessions x 3 tool calls, tool delay 0, 3 runs each)
+
+| workers | sessions/s per run | median |
+|---|---|---|
+| 1 | 23.8, 25.8, 24.8 | 24.8 |
+| 2 | 28.3, 25.9, 28.3 | 28.3 |
+| 4 | 28.3, 27.1, 24.3 | 27.1 |
+
+### Worker death to resume (20 trials, 2 workers, SIGKILL mid tool call)
+
+Settings: heartbeat interval 1.0 s, heartbeat timeout 3.0 s, sticky queue timeout 2 s, activity retry backoff starts at 1 s, tool delay 2 s.
+
+| measure | p50 | p95 | min | max |
+|---|---|---|---|---|
+| kill -> next attempt starts (s) | 3.99 | 4.00 | 3.99 | 4.00 |
+| kill -> session finished (s) | 10.08 | 10.11 | 10.07 | 10.11 |
+
+n = 20 per row; with this n the p95 is set by the two or three slowest trials.
+
+What the numbers do and do not say:
+
+- **Throughput does not grow with workers here** (about 25 sessions/s with one worker, about 27-28
+  with two or four). With everything on 4 shared cores, the likely limit is the dev server and the
+  client, not the workers; this was not investigated, so treat that as a hypothesis. These numbers
+  say nothing about a real cluster.
+- **Death to resume is almost exactly the settings.** The next attempt starts about 4.0 s after the
+  kill: the 3 s heartbeat timeout plus the 1 s first retry backoff. The spread is tiny because both
+  are fixed timers; the surviving worker was already polling. It would be longer if no worker were
+  free, and with a frozen (not killed) worker the poller can be handed the retry too (see
+  DESIGN_CHOICES 30). Finishing takes about 6 s longer than the restart: the retried tool call
+  sleeps 2 s, and the sticky-queue timeout (2 s) may add to it. That split was not measured, and
+  about 2 s of the 6 is unexplained.
+- Lowering the heartbeat timeout makes recovery faster and false alarms more likely on a slow worker.
+  Only the 3 s value was measured.
+
