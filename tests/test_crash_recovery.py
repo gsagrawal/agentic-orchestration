@@ -177,7 +177,9 @@ def test_kill_9_at_each_point_of_a_tool_call(conn, db_path, agents_path, agent, 
 
 @pytest.mark.parametrize("agent, effects, recorded", [("set-value", 1, "tool_result"), ("send-email", 0, "tool_unknown")])
 def test_kill_9_from_outside_in_the_middle_of_a_slow_tool_call(conn, db_path, agents_path, agent, effects, recorded):
-    """The tool is held in its 30 s delay (ex-2 runs with none); the test kills ex-1 there."""
+    """The tool is held in its 30 s delay (ex-2 runs with none); the test kills ex-1 once the
+    decision is logged. The kill lands somewhere before the effect; the exact point is not
+    pinned here (the fault-point table above does that). This checks an outside kill works."""
     sid = crash_scenario(conn, db_path, agents_path, agent, kill=None)
     assert effect_counts(conn).get((sid, 1), 0) == effects
     assert kinds(conn, sid).count(recorded) == 1
