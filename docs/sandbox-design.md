@@ -13,6 +13,19 @@ This is the data-plane counterpart to the durable-execution engine — the
 engine decides *when* a tool call happens, the sandbox decides *where and how
 safely* it runs.
 
+## Decided requirement (not yet a mechanism)
+
+Per [assumptions.md](assumptions.md) and FR17: the agent process itself must
+run with **no network egress other than the two mandatory choke points**
+(the tool-call gateway and the LLM-call gateway). This is a settled
+requirement on *what* the sandbox must guarantee — it's what makes treating
+agent internals as opaque for durability/bookkeeping safe rather than a
+blind spot. *Which* sandbox technology enforces this is still fully open
+below. See [agent-runtime.md](agent-runtime.md) (MC-5) for how the two
+choke points themselves are realized (egress policy + proxy + MCP gateway)
+— this document is about the sandbox boundary around that, not the gateway
+mechanics.
+
 ## Questions to resolve
 
 - **API tools vs. execution tools** (per
@@ -23,11 +36,10 @@ safely* it runs.
   lighter-weight credential-injecting proxy instead of a microVM per call —
   cheaper and faster for the likely-high-volume API-tool path. Not yet
   decided whether API tools get any sandbox at all, or just the proxy.
-- **Trust-level-dependent isolation**: the spec states agents have varying
-  "trust levels." Does isolation strength vary per agent/tenant trust level
-  (a more trusted agent gets a lighter sandbox), or is one adversarial-grade
-  bar applied uniformly regardless of stated trust? Uniform is simpler and
-  safer by default; worth deciding explicitly rather than defaulting silently.
+- **Trust-level-dependent isolation — RESOLVED**: uniform, strongest-sandbox
+  baseline regardless of an agent's stated trust level. Trust level does not
+  weaken isolation for any agent; it may still gate *other* things (tool
+  grants, rate limits) but not sandbox strength.
 - **Kubernetes-native-or-justify** (NFR13): the spec requires justifying any
   choice that isn't a native K8s primitive. A microVM sandbox runtime
   (Firecracker/Kata) is not itself a K8s primitive — whatever is chosen here
@@ -57,4 +69,7 @@ safely* it runs.
 
 ## Decision log
 
-(none yet)
+- 2026-11-25: Trust-level-dependent isolation resolved — uniform,
+  strongest-sandbox baseline for every agent regardless of stated trust
+  level. Isolation technology itself (gVisor/Firecracker/Kata/etc.) remains
+  open.

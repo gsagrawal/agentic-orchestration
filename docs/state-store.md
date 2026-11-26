@@ -36,6 +36,29 @@ entities not owned by Temporal's own event history, e.g. `COST_RECORD`,
   state store for the ERD's operational/business entities, not the secret
   store itself.
 
+## Lean (added while drafting the service architecture)
+
+[service-architecture.md](service-architecture.md) had to draw a concrete
+picture and leans **split, by construction, not by choice**: Temporal's own
+persistence owns `AGENT_RUN`/`STEP` (not a second system we design — it's
+what Temporal requires regardless); a separate application Postgres owns
+everything else in the ERD (`TENANT`, `USER`, `AGENT_DEFINITION`,
+`CREDENTIAL` pointers, `RATE_LIMIT_POLICY`, `COST_RECORD`,
+`AUDIT_LOG_ENTRY`, `LLM_CALL`, `TOOL_CALL`, `SANDBOX`,
+`HUMAN_APPROVAL_REQUEST`, `LLM_PROVIDER_CONFIG`). The latter rows are
+written directly by the LLM-call and tool-call gateways at the moment they
+enforce something, not derived from Temporal's event history after the
+fact — so the split falls out of where FR6/FR11/FR13/FR14 are actually
+enforced, not an arbitrary mirroring choice.
+
+Still open, unchanged by this lean: shared-tables-with-row-level-security
+vs. schema-per-tenant vs. database-per-tenant for the application Postgres,
+and `AUDIT_LOG_ENTRY` retention policy.
+
 ## Decision log
 
-(none yet)
+- 2026-11-25: Leaning toward a split store (Temporal persistence +
+  application Postgres) while drafting
+  [service-architecture.md](service-architecture.md) — see "Lean" above.
+  Multi-tenancy model within the application store and audit retention
+  remain open.

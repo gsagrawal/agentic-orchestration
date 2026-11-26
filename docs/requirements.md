@@ -1,5 +1,8 @@
 See also: [problem-statement.md](problem-statement.md) — the verbatim source
 spec. This document tracks it; where they diverge, this document is wrong.
+See also: [service-architecture.md](service-architecture.md) — the
+synthesized high-level service architecture built from this document and
+[major_calls.md](major_calls.md)/[assumptions.md](assumptions.md).
 
 # Agent Orchestration Framework — Requirements (Working Draft)
 
@@ -17,20 +20,22 @@ Core pillars: sandboxing, scale, failure handling, rate limiting, tenant isolati
 | ID | Requirement | Status |
 |----|-------------|--------|
 | FR1 | Agents are defined with a configurable set of tools they may call (bash, web-search, code execution, extensible to more). | DECIDED |
-| FR2 | Each tool call executes inside an isolated sandbox, provisioned per call. | DECIDED |
+| FR2 | Execution-tool calls (arbitrary code/CLI) run inside an isolated sandbox. The sandbox is created lazily, on a session's first execution-tool call, and reused for the rest of that session rather than re-provisioned per call. API-tool and agent-tool calls (FR15) don't need a sandbox at all. | DECIDED |
 | FR3 | Tenants bring their own credentials/API keys for tools; these are stored per-tenant and never cross tenant boundaries. | DECIDED |
 | FR4 | Tool calls vary from seconds (web-search, small bash/code) to hours (heavy code execution) to days (human-in-the-loop reply). The framework must support all three as first-class, not just the short case. | DECIDED |
-| FR5 | An agent run must be resumable from its last checkpoint after a pod/process failure, without re-running completed steps. | DECIDED |
+| FR5 | An agent session must be resumable after a pod/process failure, picking up from its own record of what already happened rather than starting over or re-running completed calls. | DECIDED |
 | FR6 | Rate limits are enforced per tenant (first increment). Design must not preclude adding per-agent and per-model limits later. | DECIDED (per-tenant), OPEN (per-agent/per-model — defer, don't foreclose) |
 | FR7 | LLM access goes through a provider-agnostic interface. Single provider (Anthropic) wired up now; multi-provider must be addable without reworking the core. | DECIDED |
 | FR8 | A waiting agent (e.g. mid human-in-the-loop, or queued) must consume ~0 compute — no process/pod held open per waiting agent. | DECIDED |
 | FR9 | Runaway tool executions are hard-killed at a wall-clock limit, independent of agent/LLM logic. | DECIDED |
-| FR10 | Full observability: tracing across agent run → step → tool call → sandbox, plus per-tenant/per-run cost monitoring (LLM token spend, compute spend). | DECIDED |
-| FR11 | Audit trail of agent/tool actions for compliance purposes, at command-level granularity for execution-tool calls — must be able to answer "show every command agent X ran on a given day." Creates a tension with FR12 when a secret is embedded inside a command string itself (e.g. a `--token=...` flag) rather than passed as a separate credential — that case needs in-command redaction, not just avoiding a separate credential field. | DECIDED (exists), OPEN (retention/compliance regime, in-command redaction mechanism) |
+| FR10 | Full observability: tracing a session from model call through tool call to sandbox, plus per-tenant and per-session cost monitoring (LLM token spend, compute spend). | DECIDED |
+| FR11 | Audit trail of agent/tool actions for compliance purposes, at command-level granularity for execution-tool calls — must be able to answer "show every command agent X ran on a given day." Tension with FR12 (secret embedded in a command string, e.g. `--token=...`) mitigated by design, not fully solved: credentials are injected outside the agent's view (a credential helper or proxy substitutes the value at execution time), so the agent never constructs a command string containing the raw secret, and it therefore shouldn't appear in audit text by construction. **Residual risk, unsolved, production item**: a command could still legitimately read and print a secret it has access to (e.g. dumping an env var, reading a file, an API response echoing a token) — general in-command output redaction is not solved. Tracked as **AUDIT-1** in [poc-vs-production.md](poc-vs-production.md). | DECIDED (exists, mitigated by design), OPEN (retention/compliance regime; residual output-redaction risk is a production item) |
 | FR12 | No sensitive data (tenant credentials, secrets, raw PII) is ever logged or persisted outside the dedicated secret store — audit/observability data is redacted by construction. | DECIDED |
-| FR13 | Tool credentials never enter the LLM's context: the model sees only a tool name + parameters and decides to call it on that basis; the actual credential value is injected at the execution layer (sandbox or API-call proxy), after the model's decision, never before or visible to it. | DECIDED |
+| FR13 | Tool credentials never enter the LLM's context: the model sees only a tool name + parameters and decides to call it on that basis; the actual credential value is injected at the network layer, after the model's decision, never before or visible to it. See [service-architecture.md](service-architecture.md) for which component does the injecting. | DECIDED |
 | FR14 | Every tool call is attributable to the agent, the tenant, *and* the triggering human user (not just the tenant) — requires a `USER` concept in the data model, not just `TENANT`. | DECIDED |
-| FR15 | Tool calls split into three categories with different handling: **API tools** (HTTP calls to internal/third-party services using tenant credentials), **execution tools** (arbitrary Python/Node/Bash and CLIs like pandoc/gh/jq/curl/git), and **agent tools** (an agent-to-agent call, carrying its own identity/tenant/audit trail, through the exact same gateway — no side channel around authorization). Only execution tools necessarily require a full sandbox; API and agent tools may be served by lighter-weight paths (a credential-injecting proxy, or the gateway creating a child `AGENT_RUN`, respectively). See [assumptions.md](assumptions.md). | DECIDED |
+| FR15 | Tool calls split into three categories with different handling: **API tools** (HTTP calls to internal/third-party services using tenant credentials), **execution tools** (arbitrary Python/Node/Bash and CLIs like pandoc/gh/jq/curl/git), and **agent tools** (an agent calling another agent — its own identity/tenant/audit trail carried along, through the same path any run starts through, no side channel around authorization). Only execution tools need a sandbox; API tools go through a lighter-weight credential-injecting proxy instead, and an agent tool call needs neither — it just starts a new session for the called agent and waits for its result. See [service-architecture.md](service-architecture.md). | DECIDED |
+| FR16 | Every model call an agent's reasoning makes goes through the platform's LLM gateway — there is no path for a model call to happen off it. In the default design the reasoning loop is our own trusted platform code, so this is automatic: the loop simply has no other way to reach a model. It becomes a real constraint, not just a default, once a tenant's own reasoning code is allowed to run in place of ours (FR17) — that code must still be forced through the same gateway for rate limiting (FR6) and cost metering to hold. See [service-architecture.md](service-architecture.md). | DECIDED |
+| FR17 | Only the code a sandbox is asked to run is sandboxed — the reasoning loop that decides what to call is trusted platform code and is not itself sandboxed. A sandbox's only network path is to the platform's tool-call proxy: no direct reach to the internet, the LLM provider, or any secret. This keeps a malicious or buggy tool call contained even though the loop issuing it is not. **[FUTURE]** If a tenant is ever allowed to bring its own reasoning loop in place of ours, that loop stops being trusted platform code and must run under this same rule — sandboxed, with its model calls forced through the LLM gateway (FR16) rather than made directly. See [service-architecture.md](service-architecture.md). | DECIDED |
 
 ## 3. Non-Functional Requirements
 
@@ -44,182 +49,42 @@ Core pillars: sandboxing, scale, failure handling, rate limiting, tenant isolati
 | NFR6 | Extensibility: tools and LLM providers are pluggable via stable interfaces, not hardcoded integrations. | DECIDED |
 | NFR7 | Portability: primary deployment is cloud-native K8s (new cluster, no existing one to integrate with); on-prem/hybrid is a follow-up — avoid gratuitous cloud-proprietary lock-in where it's cheap to do so, but don't over-engineer for on-prem now. | DECIDED |
 | NFR8 | Cost efficiency: idle sandboxes and suspended agents must not accrue compute cost. | DECIDED |
-| NFR9 | Compliance target (SOC2 / HIPAA / FedRAMP / none specified). | OPEN |
-| NFR10 | Multi-region / data residency requirements. | OPEN |
-| NFR11 | Availability target (SLA, e.g. 99.9%) and per-tenant SLA tiering. | OPEN |
+| NFR9 | Compliance target (SOC2 / HIPAA / FedRAMP / none specified). | **Not required for POC** — deferred to production scope |
+| NFR10 | Multi-region / data residency requirements. | **Not required for POC** — deferred to production scope |
+| NFR11 | Availability target (SLA, e.g. 99.9%) and per-tenant SLA tiering. | **Not required for POC** — deferred to production scope |
 | NFR12 | Architecture-significant decisions (e.g. durable execution engine choice) must be backed by an explicit cost + data-scale calculation (infra cost, storage growth under projected throughput/retention, throughput headroom) before being finalized. | DECIDED |
 | NFR13 | Kubernetes-native by default: scheduling, isolation, scaling, and failure handling should use Kubernetes primitives. Any choice that isn't a native K8s primitive (e.g. a workflow engine, a sandbox runtime) must carry an explicit justification in its own topic document, not just an implicit assumption. | DECIDED |
 
-## 4. Entity-Relationship Diagram (conceptual)
+## 4. Core Entities (conceptual)
 
-See also: [durable-execution-engine.md](durable-execution-engine.md) for the
-evaluation behind how `AGENT_RUN`/`STEP` are executed and checkpointed.
+Not a schema — just naming, in plain terms, the things the requirements
+above assume exist. Full definitions of the services that own them live in
+[service-architecture.md](service-architecture.md); this section only says
+what each is for.
 
-Conceptual data model — not a physical schema yet. Captures the entities implied
-by the requirements above: tenant-owned agent definitions, durable agent runs
-made of steps, steps that invoke LLM calls or tool calls, tool calls that execute
-in sandboxes and may block on human approval, plus the cross-cutting concerns
-(credentials, rate limits, cost, audit).
+- **Agent** — a tenant-owned definition: version, model, system
+  instructions, the tools it may call, and its environment config. (FR1,
+  FR3, FR15)
+- **Agent Session** — one run of an Agent, from start to
+  done/cancelled/expired, pinned to the Agent version it started with.
+  Carries a deadline, its current status, and running usage/cost totals.
+  (FR4, FR5, FR8, FR9, FR10)
+- **User** — the person, inside a tenant, who triggered a given Session.
+  (FR14)
+- **Secrets** — a tenant's credentials. Referenced by name wherever they're
+  used or logged; the real value lives only in the secret store, never
+  anywhere else. (FR3, FR12, FR13)
+- Three further records back a Session without being part of the Session
+  itself: the **session log** (the step-by-step record a Session resumes
+  from), the **audit store** (the compliance record of every call — who,
+  what, when, credential names only, never a value), and the **object
+  store** (workspace files produced during a run). (FR5, FR8, FR11, FR12)
 
-```mermaid
-erDiagram
-    TENANT ||--o{ AGENT_DEFINITION : owns
-    TENANT ||--o{ CREDENTIAL : owns
-    TENANT ||--o{ RATE_LIMIT_POLICY : configures
-    TENANT ||--o{ AGENT_RUN : owns
-    TENANT ||--o{ AUDIT_LOG_ENTRY : scoped_to
-    TENANT ||--o{ COST_RECORD : scoped_to
-    TENANT ||--o{ USER : has
-
-    USER ||--o{ AGENT_RUN : triggers
-
-    AGENT_RUN ||--o{ AGENT_RUN : spawns
-
-    AGENT_DEFINITION ||--o{ AGENT_RUN : instantiates
-    AGENT_DEFINITION }o--o{ TOOL_DEFINITION : allows
-
-    AGENT_RUN ||--o{ STEP : contains
-    AGENT_RUN ||--o{ COST_RECORD : generates
-    AGENT_RUN ||--o{ AUDIT_LOG_ENTRY : generates
-
-    STEP ||--o| LLM_CALL : may_invoke
-    STEP ||--o| TOOL_CALL : may_invoke
-
-    TOOL_CALL }o--|| TOOL_DEFINITION : of_type
-    TOOL_CALL ||--o| SANDBOX : executes_in
-    TOOL_CALL ||--o| HUMAN_APPROVAL_REQUEST : may_wait_on
-    TOOL_CALL }o--o| CREDENTIAL : uses
-
-    LLM_CALL }o--|| LLM_PROVIDER_CONFIG : via
-
-    TENANT {
-        id id
-        string name
-        string compliance_tier
-        string status
-    }
-    AGENT_DEFINITION {
-        id id
-        id tenant_id
-        string name
-        json allowed_tools
-        json model_config
-    }
-    AGENT_RUN {
-        id id
-        id agent_definition_id
-        id tenant_id
-        id triggering_user_id
-        id parent_run_id "nullable, for future multi-agent"
-        enum status "running | suspended | completed | failed"
-        timestamp created_at
-        timestamp last_checkpoint_at
-    }
-    USER {
-        id id
-        id tenant_id
-        string identifier
-        string role
-    }
-    STEP {
-        id id
-        id agent_run_id
-        enum type "llm_call | tool_call | human_wait"
-        enum status "pending | running | suspended | succeeded | failed"
-        int retry_count
-        json checkpoint_data
-        timestamp started_at
-        timestamp completed_at
-    }
-    LLM_CALL {
-        id id
-        id step_id
-        string provider
-        string model
-        int tokens_in
-        int tokens_out
-        decimal cost
-        int latency_ms
-        enum status
-    }
-    TOOL_DEFINITION {
-        id id
-        string name
-        string category "api | execution | agent"
-        string type "bash | web_search | code_exec | http_api | ..."
-        json schema
-    }
-    TOOL_CALL {
-        id id
-        id step_id
-        id tool_definition_id
-        id sandbox_id
-        json input
-        json output
-        enum status
-        int timeout_seconds
-        timestamp started_at
-        timestamp completed_at
-    }
-    SANDBOX {
-        id id
-        id tenant_id
-        string isolation_type "microVM | gVisor | ..."
-        json resource_limits
-        enum status "warming | assigned | executing | terminated"
-    }
-    CREDENTIAL {
-        id id
-        id tenant_id
-        string tool_type
-        string secret_ref
-        json scope
-    }
-    HUMAN_APPROVAL_REQUEST {
-        id id
-        id tool_call_id
-        enum status "pending | approved | rejected | expired"
-        timestamp requested_at
-        timestamp responded_at
-    }
-    RATE_LIMIT_POLICY {
-        id id
-        id tenant_id
-        string scope "tenant | agent | model (future)"
-        string limit_type "rps | tpm | concurrent"
-        int limit_value
-    }
-    LLM_PROVIDER_CONFIG {
-        id id
-        string provider_name
-        json connection_config
-    }
-    COST_RECORD {
-        id id
-        id tenant_id
-        id agent_run_id
-        string resource_type "llm_tokens | compute_seconds"
-        decimal amount
-        timestamp recorded_at
-    }
-    AUDIT_LOG_ENTRY {
-        id id
-        id tenant_id
-        string actor
-        string action
-        string resource_ref
-        timestamp occurred_at
-    }
-```
-
-Notes on the ERD:
-- `CREDENTIAL.secret_ref` is a pointer into a dedicated secret store (e.g. Vault/KMS), never the secret value itself — the ERD intentionally has no column that holds raw secret material, per FR12/NFR4.
-- `STEP.checkpoint_data` is what makes FR5/FR8 possible: a suspended step is just a row, not a process. `AGENT_RUN` + `STEP` together are effectively an event-sourced log, not a snapshot — likely append-only in the real schema.
-- `HUMAN_APPROVAL_REQUEST` is modeled as a first-class entity (not just a tool call with a long timeout) because its failure/expiry semantics differ from a hung tool call (FR4).
-- `TOOL_DEFINITION.category` (`api` vs. `execution`) determines the execution path: an `execution`-category `TOOL_CALL` runs in a `SANDBOX`; an `api`-category one plausibly doesn't need a full sandbox at all and can be served by a lighter-weight credential-injecting proxy — the `SANDBOX` relationship on `TOOL_CALL` is optional (`o|`) for exactly this reason (FR15). Either way, the credential is injected at that execution layer, never passed into the LLM's context (FR13).
-- `AGENT_RUN.triggering_user_id` (and the `USER` entity generally) exists so every tool call is attributable to agent, tenant, *and* triggering human — not just tenant (FR14). `AUDIT_LOG_ENTRY` resolves the triggering user by joining through `AGENT_RUN`, rather than duplicating `user_id` on every entry.
-- Command-level audit logging (FR11) and "never log sensitive data" (FR12) are in tension whenever a secret is embedded inside a command string itself (e.g. a CLI flag like `--token=...`), not just when it's a separate credential field — the audit pipeline needs in-command secret redaction, not just avoidance of a credential column. Mechanism not yet decided.
-- `AGENT_RUN.parent_run_id` (self-referencing, nullable) exists for future multi-agent support (a parent run spawning/coordinating child runs) — see [agent-model.md](agent-model.md) and [assumptions.md](assumptions.md). The POC never populates it; its presence now avoids a schema migration later. An agent-to-agent call is modeled as a `TOOL_CALL` with `TOOL_DEFINITION.category = "agent"`, not a bespoke `STEP` type — the gateway sets the child's `parent_run_id` when it creates the child run, and the call goes through the same authorization/credential/audit/rate-limit path as any other tool call.
+Tenant, Agent, and User are what a tool call needs to resolve to answer
+"who did this, for whom" (FR14). The session log and audit store exist so
+a Session can be resumed without a live process held open while it waits
+(FR5, FR8), and so every call it made can be reconstructed afterward
+(FR10, FR11).
 
 See also: [poc-vs-production.md](poc-vs-production.md) — tracks every
 deliberate POC-phase shortcut against a locked requirement, with a priority
@@ -238,7 +103,8 @@ architectural decisions, for fast skimming.
 - Durability & resilience (surviving pod restart/deployment/node drain mid-task): see [durability-and-resilience.md](durability-and-resilience.md)
 - Observability & cost monitoring (live agent status, tracing, per-tenant cost): see [observability-and-cost-monitoring.md](observability-and-cost-monitoring.md)
 - Implementation language & framework (Go vs. Python vs. polyglot): see [language-and-framework-choice.md](language-and-framework-choice.md)
-- What is an agent — single tool-loop vs. graph-reasoning vs. multi-agent team, and whether an open-source framework's engine composes with Temporal: see [agent-model.md](agent-model.md) (foundational — may revise the ERD and the language choice above)
-- State store (the actual DB behind the ERD's entities — Postgres vs. CockroachDB vs. other, and how it relates to whatever the durable-execution engine needs): see [state-store.md](state-store.md) — a "must state" item per the spec
+- What is an agent — single tool-loop vs. graph-reasoning vs. multi-agent team, and whether an open-source framework's engine composes with Temporal: see [agent-model.md](agent-model.md) (foundational — may revise the entities above and the language choice above)
+- State store (the actual DB behind the entities above — Postgres vs. CockroachDB vs. other, and how it relates to whatever the durable-execution engine needs): see [state-store.md](state-store.md) — a "must state" item per the spec
 - How agents are defined and versioned (ties directly to the workflow-versioning concern already flagged in durable-execution-engine.md and durability-and-resilience.md): see [agent-definition-and-versioning.md](agent-definition-and-versioning.md) — a "must state" item per the spec
 - Trust-level-dependent sandbox isolation (spec: agents have varying "trust levels") — added as a question in [sandbox-design.md](sandbox-design.md)
+- Agent runtime / integration surface — what actually enforces the two-choke-point contract in code (sandbox egress policy + LLM proxy + MCP tool gateway, leaning away from a bespoke SDK): see [agent-runtime.md](agent-runtime.md) (MC-5)

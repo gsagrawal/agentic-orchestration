@@ -137,6 +137,12 @@ the trace-tool choice isn't a lock-in and isn't a rewrite if revisited later.
 - Live status and audit views need to filter/join by triggering user (FR14),
   not just tenant and agent — the `USER` entity added to the ERD needs to
   flow through to whatever surfaces "what has agent X cost so far."
+- Per [assumptions.md](assumptions.md) (FR16), the LLM-call gateway sees
+  every model call from every agent shape, including internal calls that
+  never become a tool call and are invisible to the durability engine. That
+  gives a cheap liveness signal for live-status views ("last model call N
+  seconds ago") even during an opaque graph-reasoning agent's internal-only
+  phases — worth wiring into the live-status answer for FR10, not just cost.
 
 ## Decision log
 

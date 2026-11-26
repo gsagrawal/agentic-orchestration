@@ -1,0 +1,7 @@
+# Discussion on temporal vs langgraph vs message queue ::: 
+    it was a small part of our architcture. i spent a lot of time on it without any clear goal. I didnt think of the componets/services first before getting into the workflow management. 
+
+# Slopy discussions/requirements-architecture :: i didnt set the memory of the claude first (new machine setup). by default claude is going too slopy and using lots of tech jargons and very complicated structure. 
+
+# Going into the discussion of which langauge/framework too early. At the initial stage langauge was not that important, first i should work on design and architecture and then pick the coding langauge which suits the design (not the other way round). 
+

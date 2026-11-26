@@ -4,7 +4,9 @@ Register of the big, hard-to-reverse decisions — for fast skimming. Full
 reasoning lives in the linked topic document; this is the index and the
 verdict, not a duplicate of the analysis.
 
-Referenced from: [requirements.md](requirements.md).
+Referenced from: [requirements.md](requirements.md). See also:
+[service-architecture.md](service-architecture.md) — where these calls are
+assembled into one component diagram.
 
 ## MC-1: Production execution engine — Temporal vs. custom message-queue vs. LangGraph-as-engine
 
@@ -100,6 +102,28 @@ once needed.
 
 **Reversibility: N/A** — additive, not a constraint that could be "wrong."
 
+## MC-5: Agent runtime / integration surface — bespoke SDK vs. infrastructure enforcement
+
+**Status: leaning infrastructure enforcement, not finalized.**
+Full detail: [agent-runtime.md](agent-runtime.md).
+
+**Not the same discussion as MC-1/MC-2** (overall agent management — who
+owns crash survival, and whether agent shape matters to the platform; both
+already settled: Temporal does, and it doesn't). MC-5 is a separate,
+narrower question that exists regardless of the engine choice: what
+actually makes the two-choke-point contract in
+[assumptions.md](assumptions.md) true in code. Realized this
+doesn't require a bespoke SDK every agent must be written against — sandbox
+egress policy + a proxy (for the LLM-call boundary) + an MCP gateway (for
+the tool-call boundary) let any framework plug in via configuration, not
+custom code. The one remaining custom piece is resume/replay hydration,
+scoped per-agent/per-adapter, not a shared runtime.
+
+**Reversibility: moderate-to-hard.** The protocol/proxy contract, once
+agents are built against it, is costly to change platform-wide — but
+choosing it doesn't lock in any particular agent framework, which is the
+point.
+
 ## Decision log
 
 - 2026-11-25: Register created. Seeded with MC-1 through MC-4 from prior
@@ -110,3 +134,7 @@ once needed.
   MC-1 reinforced (Temporal's event history realizes the platform-owned
   durability argument directly). MC-2 de-risked to a per-agent
   implementation detail, no longer a platform-wide commitment.
+- 2026-11-25: MC-5 added — the agent runtime/integration surface, the
+  mechanism that makes the two-choke-point contract true in code. Leaning
+  infrastructure enforcement (egress policy + proxy + MCP gateway) over a
+  bespoke SDK.

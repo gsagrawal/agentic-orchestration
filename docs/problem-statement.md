@@ -36,6 +36,3 @@ another, the platform, or the tenant's data.
 | Durability | An agent mid-task survives a pod restart, a node drain and a deploy |
 | Observability | An operator can answer "what is agent X doing right now and what has it cost so far" |
 
-**Things you may decide yourself, but must state:** language and runtime,
-message bus or workflow engine, sandbox technology, state store, how agents
-are defined and versioned.
