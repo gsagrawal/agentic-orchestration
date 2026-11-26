@@ -22,8 +22,6 @@ swappable state plumbing) are implemented as specified and are not repeated here
 | 11 | `assign()` refuses terminal sessions (`SessionClosed`). | Let the caller check the state first. | A check outside the transaction races; found in self-review of step 1. |
 | 12 | `synchronous=NORMAL`. | `FULL`. | Safe against `kill -9` (what the tests do) but may lose the last commits on OS crash or power loss. Chosen for speed; a real deployment would not accept this. |
 
-Open item (decide in step 7): `append()` checks only the epoch, so the last holder can still write to a session that has just gone terminal. The terminal transition should bump the epoch so the holder is fenced.
-
 ## Step 2: tool service stub
 
 | # | Choice | Rejected alternative | Why |
@@ -53,10 +51,6 @@ Open item (decide in step 7): `append()` checks only the epoch, so the last hold
 | 30 | `agent_id`/`agent_version` columns pin the definition at admission; the agent store is a JSON file. | Look up "latest" on each pickup. | Pinning is required by the architecture: edits must not change running sessions. |
 | 31 | Workers are `multiprocessing` "spawn" processes. | "fork". | A forked child would inherit the parent's open SQLite connections. |
 
-Open items from step 3 review:
-- An unexpected exception (bad agent id, unknown tool, the step-6 placeholder) kills the whole worker, and every session on it. Deliberate for now: swallowing it would make a broken session spin silently. Revisit with the reconciler (step 5) and caps (step 7).
-- A resumed `waiting` session would be released again immediately. Step 7 must add a human-response log entry and make `advance()` check for it before releasing.
-
 ## Step 4: session manager
 
 | # | Choice | Rejected alternative | Why |
@@ -70,3 +64,14 @@ Open items from step 3 review:
 | 38 | With no executor registered, sessions stay `created` and the reconciler retries. | Reject admission. | Admission is about the tenant's limits; capacity is the scheduler's problem. |
 | 39 | The pinned version is the agent's highest version at admission. | Caller chooses the version. | Matches the architecture ("pins the Session to the Agent's current version"). |
 | 40 | `reconcile_once()` is the single place that assigns; step 5 extends it to dead executors. Assumes one manager process (no leader election). | Assign inside `start_session`. | One code path for first assignment and for recovery, so it is tested once. |
+
+## Open items (not yet decided or built)
+
+| Item | Why it matters | Planned in |
+|------|----------------|-----------|
+| `least_loaded_executor()` ignores heartbeats | A dead executor would be handed sessions | Step 5 |
+| Resume with a tool call in flight raises `NotImplementedError` | Fails closed until the recovery rules exist | Step 6 |
+| A terminal transition must bump the epoch | `append()` checks only the epoch, so the last holder could still write to a session that just ended | Step 7 |
+| A resumed `waiting` session would be released again at once | `advance()` needs a human-response log entry to read first | Step 7 |
+| An unexpected exception kills the whole worker and every session on it | Swallowing it would make a broken session spin silently | Steps 5 and 7 |
+| One manager process only | Two managers could assign the same session; needs leader election | Not planned (README gap) |

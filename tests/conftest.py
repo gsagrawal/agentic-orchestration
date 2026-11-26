@@ -23,7 +23,10 @@ import json
 @pytest.fixture
 def agents_path(tmp_path):
     """FAKED agent store file. Version 1 of each agent; scripts are plain lists of actions."""
-    tool = lambda name, **args: {"do": "tool", "tool": name, "args": args}  # noqa: E731
+
+    def tool(name, **args):
+        return {"do": "tool", "tool": name, "args": args}
+
     agents = {
         "two-tools": {"1": {"script": [tool("lookup", key="a"), tool("send_email", to="x"), {"do": "finish"}]}},
         "ask-human": {"1": {"script": [tool("lookup", key="a"), {"do": "wait"}, {"do": "finish"}]}},
