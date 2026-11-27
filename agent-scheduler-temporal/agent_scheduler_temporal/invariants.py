@@ -2,7 +2,8 @@
 
 check_invariants returns a list of violations; empty means every invariant held.
 """
-from agent_scheduler_temporal.models import AgentVersion, SessionResult
+from agent_scheduler_temporal.agent import AgentVersion
+from agent_scheduler_temporal.models import SessionResult
 from agent_scheduler_temporal.notifier import FakeNotifier
 from agent_scheduler_temporal.sandbox import FakeSandboxController
 from agent_scheduler_temporal.tool_service import ToolService

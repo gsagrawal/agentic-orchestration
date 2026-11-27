@@ -5,7 +5,8 @@ import pytest
 from temporalio.worker import Replayer, Worker
 
 from agent_scheduler_temporal.activities import Activities
-from agent_scheduler_temporal.models import TASK_QUEUE, AgentVersion, SessionInput
+from agent_scheduler_temporal.agent import AgentVersion
+from agent_scheduler_temporal.models import TASK_QUEUE, SessionInput
 from agent_scheduler_temporal.sandbox import FakeSandboxController
 from agent_scheduler_temporal.tool_service import ToolService
 from agent_scheduler_temporal.tools import FakeTools
@@ -131,7 +132,7 @@ async def test_an_unknown_model_action_fails_the_session_instead_of_retrying_for
 async def test_a_tool_the_service_has_no_metadata_for_fails_the_session_instead_of_retrying_forever(run_session):
     from temporalio.client import WorkflowFailureError
 
-    from agent_scheduler_temporal.tools import ToolSpec
+    from agent_scheduler_temporal.agent import ToolSpec
 
     ghost = ToolSpec("ghost", "api", idempotent=True, timeout_s=10, grant="read")
     broken = AgentVersion("a", 1, [ghost], ["read"], 5, [tool("ghost"), {"do": "finish"}])

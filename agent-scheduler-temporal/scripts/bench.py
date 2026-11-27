@@ -22,7 +22,8 @@ from temporalio.testing import WorkflowEnvironment
 
 from agent_scheduler_temporal.agent_store import load_agent
 from agent_scheduler_temporal.harness import WorkerProcesses
-from agent_scheduler_temporal.models import HEARTBEAT_INTERVAL_S, HEARTBEAT_TIMEOUT_S, AgentVersion, SessionInput
+from agent_scheduler_temporal.agent import AgentVersion
+from agent_scheduler_temporal.models import HEARTBEAT_INTERVAL_S, HEARTBEAT_TIMEOUT_S, SessionInput
 from agent_scheduler_temporal.tool_service import ToolService
 from agent_scheduler_temporal.tools import FakeTools
 from agent_scheduler_temporal.worker import STICKY_TIMEOUT

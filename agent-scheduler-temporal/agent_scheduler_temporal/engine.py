@@ -19,7 +19,7 @@ Contract notes, so another implementation behaves the same way:
 from enum import Enum
 from typing import Protocol
 
-from agent_scheduler_temporal.models import AgentVersion
+from agent_scheduler_temporal.agent import AgentVersion
 
 
 class SessionStatus(Enum):

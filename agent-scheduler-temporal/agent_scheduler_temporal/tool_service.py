@@ -24,7 +24,8 @@ from dataclasses import dataclass
 
 from agent_scheduler_temporal.db import txn
 from agent_scheduler_temporal.fault import maybe_fault
-from agent_scheduler_temporal.tools import FakeTools, ToolSpec
+from agent_scheduler_temporal.agent import ToolSpec
+from agent_scheduler_temporal.tools import FakeTools
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS calls (

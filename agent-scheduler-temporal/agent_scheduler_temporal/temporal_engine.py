@@ -9,20 +9,24 @@ from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.service import RPCError, RPCStatusCode
 
 from agent_scheduler_temporal.engine import EngineUnavailable, SessionStatus
-from agent_scheduler_temporal.models import TASK_QUEUE, AgentVersion, MessageSignal, ReplySignal, SessionInput
+from agent_scheduler_temporal.agent import AgentVersion
+from agent_scheduler_temporal.models import TASK_QUEUE, MessageSignal, ReplySignal, SessionInput
 from agent_scheduler_temporal.workflow import AgentSession
 
 
 class TemporalEngine:
-    def __init__(self, client: Client, task_queue: str = TASK_QUEUE, query_timeout_s: float = 5.0):
+    def __init__(
+        self, client: Client, task_queue: str = TASK_QUEUE, query_timeout_s: float = 5.0, continue_after_steps: int = 0
+    ):
         self._client = client
+        self._continue_after_steps = continue_after_steps  # an executor setting, not part of the agent
         self._task_queue = task_queue
         self._query_timeout = timedelta(seconds=query_timeout_s)
 
     async def start(self, session_id: str, tenant: str, agent: AgentVersion, message: str) -> None:
         await self._client.start_workflow(
             AgentSession.run,
-            SessionInput(session_id, tenant, agent, message),
+            SessionInput(session_id, tenant, agent, message, continue_after_steps=self._continue_after_steps),
             id=session_id,
             task_queue=self._task_queue,
             # The active-run limit is Temporal's workflow execution timeout (see models.AgentVersion).

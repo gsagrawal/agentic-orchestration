@@ -14,7 +14,8 @@ from temporalio.client import Client
 from temporalio.service import RPCError
 
 from agent_scheduler_temporal.harness import WorkerProcesses
-from agent_scheduler_temporal.models import AgentVersion, ReplySignal, SessionInput, SessionResult
+from agent_scheduler_temporal.agent import AgentVersion
+from agent_scheduler_temporal.models import ReplySignal, SessionInput, SessionResult
 from agent_scheduler_temporal.notifier import FakeNotifier
 from agent_scheduler_temporal.sandbox import FakeSandboxController
 from agent_scheduler_temporal.tool_service import ToolService
@@ -33,11 +34,13 @@ def _t(tool, **args):
 
 
 FINISH = {"do": "finish"}
-# One of each kind of session. Short continue_after_steps on some, so continue-as-new happens under kills.
+# One of each kind of session. The executor setting continue_after_steps is short for two of them,
+# so continue-as-new happens under kills.
+CONTINUE_AFTER_STEPS = {"idempotent": 2, "code": 3}
 CHAOS_AGENTS: dict[str, AgentVersion] = {
-    "idempotent": _agent("idempotent", [_t("set_value"), _t("lookup"), _t("set_value"), FINISH], continue_after_steps=2),
+    "idempotent": _agent("idempotent", [_t("set_value"), _t("lookup"), _t("set_value"), FINISH]),
     "non-idempotent": _agent("non-idempotent", [_t("send_email"), _t("lookup"), _t("send_email"), FINISH]),
-    "code": _agent("code", [_t("run_code"), _t("lookup"), _t("run_code"), FINISH], continue_after_steps=3),
+    "code": _agent("code", [_t("run_code"), _t("lookup"), _t("run_code"), FINISH]),
     "asks-and-gets-answer": _agent("asks-and-gets-answer", [_t("lookup"), {"do": "ask_human", "question": "ok?"}, _t("send_email"), FINISH]),
     "asks-and-expires": _agent("asks-and-expires", [{"do": "ask_human", "question": "ok?"}, FINISH], wait_expiry_s=3.0),
     "poison": _agent("poison", [_t("lookup")], loop=True, step_cap=15),
@@ -85,7 +88,9 @@ async def run_chaos(
             sid = f"chaos-{seed}-{i}"
             agent_of[sid] = agent
             handles[sid] = await client.start_workflow(
-                AgentSession.run, SessionInput(sid, "tenant-1", agent, "go"), id=sid, task_queue=workers.task_queue
+                AgentSession.run,
+                SessionInput(sid, "tenant-1", agent, "go", continue_after_steps=CONTINUE_AFTER_STEPS.get(agent.agent_id, 0)),
+                id=sid, task_queue=workers.task_queue,
             )
             if agent.agent_id == "asks-and-gets-answer":
                 answerers.append(asyncio.create_task(_answer_when_asked(client, sid, step=1)))

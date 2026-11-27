@@ -86,7 +86,7 @@ class AgentSession:
                 if step >= agent.step_cap:
                     status = "step_cap"
                     break
-                too_many_steps = agent.continue_after_steps and step - first_step_of_run >= agent.continue_after_steps
+                too_many_steps = inp.continue_after_steps and step - first_step_of_run >= inp.continue_after_steps
                 if too_many_steps or workflow.info().is_continue_as_new_suggested():
                     # Long history: start a fresh run, carrying the history forward. The sandbox is kept.
                     # (is_continue_as_new_suggested is Temporal telling us the run is getting too big;
@@ -96,6 +96,7 @@ class AgentSession:
                         inp.session_id, inp.tenant, agent, inp.message,
                         SessionState(history, step, sorted(self._seen_message_ids), sandbox_created_before,
                                      sandbox_used, carry.continued + 1),
+                        continue_after_steps=inp.continue_after_steps,
                     ))
                 action = await workflow.execute_activity_method(
                     Activities.call_model,

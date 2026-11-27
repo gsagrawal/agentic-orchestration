@@ -6,7 +6,7 @@ timeout, grant) comes from FakeTools.SPECS, so adding a tool is a data change.
 import json
 from pathlib import Path
 
-from agent_scheduler_temporal.models import AgentVersion
+from agent_scheduler_temporal.agent import AgentVersion
 from agent_scheduler_temporal.tools import FakeTools
 
 DEFAULT_PATH = Path(__file__).with_name("agents.json")
@@ -31,5 +31,4 @@ def load_agent(agent_id: str, version: int, path: Path = DEFAULT_PATH) -> AgentV
         loop=data.get("loop", False),
         wait_expiry_s=data.get("wait_expiry_s", 86400.0),
         active_limit_s=data.get("active_limit_s", 3600.0),
-        continue_after_steps=data.get("continue_after_steps", 0),
     )

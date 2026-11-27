@@ -5,7 +5,8 @@ import pytest
 from temporalio.client import WorkflowExecutionStatus, WorkflowFailureError
 from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
-from agent_scheduler_temporal.models import AgentVersion, MessageSignal, SessionInput
+from agent_scheduler_temporal.agent import AgentVersion
+from agent_scheduler_temporal.models import MessageSignal, SessionInput
 from agent_scheduler_temporal.tools import FakeTools
 from agent_scheduler_temporal.workflow import AgentSession
 from tests.helpers import System, wait_until
@@ -15,10 +16,10 @@ def tool(name, **args):
     return {"do": "tool", "tool": name, "args": args}
 
 
-async def start_direct(s, agent: AgentVersion, session_id: str, **kwargs):
+async def start_direct(s, agent: AgentVersion, session_id: str, continue_after_steps: int = 0, **kwargs):
     """Start a workflow with an agent version built in the test (the manager loads from agents.json)."""
     return await s.env.client.start_workflow(
-        AgentSession.run, SessionInput(session_id, "acme", agent, "go"),
+        AgentSession.run, SessionInput(session_id, "acme", agent, "go", continue_after_steps=continue_after_steps),
         id=session_id, task_queue=s.task_queue, **kwargs,
     )
 
@@ -86,7 +87,7 @@ async def test_runaway_active_session_is_stopped_by_the_execution_timeout(env, t
 async def test_continue_as_new_carries_history_and_keeps_each_step_exactly_once(env, tmp_path):
     script = [tool("lookup", n=i) for i in range(8)] + [{"do": "finish"}]
     async with System(env, tmp_path, "q-s7-e") as s:
-        handle = await start_direct(s, build(script, continue_after_steps=3), "can-1")
+        handle = await start_direct(s, build(script), "can-1", continue_after_steps=3)
         result = await handle.result()  # follows the chain of runs
         assert result.status == "finished"
         assert result.continued == 2  # steps 0-2, 3-5, 6-7
@@ -98,7 +99,7 @@ async def test_continue_as_new_carries_history_and_keeps_each_step_exactly_once(
 async def test_continue_as_new_keeps_the_sandbox_and_the_message_dedupe(env, tmp_path):
     script = [tool("run_code", n=i) for i in range(6)] + [{"do": "finish"}]
     async with System(env, tmp_path, "q-s7-f", tool_delay_s=0.4) as s:
-        handle = await start_direct(s, build(script, continue_after_steps=2), "can-2")
+        handle = await start_direct(s, build(script), "can-2", continue_after_steps=2)
         await handle.signal(AgentSession.message, MessageSignal("m1", "hi"))
         await wait_until(lambda: s.tools.state("can-2:3") != "none")  # now in a later run
         await handle.signal(AgentSession.message, MessageSignal("m1", "hi again"))

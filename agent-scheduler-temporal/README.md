@@ -62,8 +62,12 @@ The manager reaches the thing that runs sessions only through `SessionEngine` (`
 `status`, `open_step`, `reply`, `message`, `stop`. `temporal_engine.py` is the one implementation and
 the only file on the manager's side that imports `temporalio`. To replace Temporal with an API call
 or a message queue, write another class with those methods; `session_manager.py` and `api.py` do not
-change. `tests/test_manager_without_temporal.py` runs the whole manager and API against an in-memory
-engine to keep that true. Only the manager side is behind the interface: the workflow, activities and
+change. Two tests keep that true: `tests/test_manager_without_temporal.py` runs the whole manager and
+API against an in-memory engine, and `tests/test_boundaries.py` walks the imports and fails if the
+manager side (`session_manager`, `api`, `engine`, `agent`, `agent_store`) ever reaches the workflow,
+the activities, the worker, the executor's data types or `temporalio`. Executor-only settings such as
+`continue_after_steps` belong to the engine (`TemporalEngine(continue_after_steps=...)`), not to the
+agent definition. Only the manager side is behind the interface: the workflow, activities and
 worker are the Temporal-specific part by design, and would be rewritten for another engine.
 
 ## Layout (one module per component)
@@ -72,7 +76,8 @@ worker are the Temporal-specific part by design, and would be rewritten for anot
 |--------|-----------|
 | `api.py`, `session_manager.py` | session-manager: HTTP API (FastAPI), admission, per-tenant quotas, reply / message / stop. No Temporal imports. |
 | `engine.py`, `temporal_engine.py` | the interface the manager uses to reach the runner, and its Temporal implementation |
-| `workflow.py`, `activities.py`, `models.py` | agent-executor: the `AgentSession` workflow and its activities |
+| `agent.py` | the agent definition (`AgentVersion`) and tool metadata (`ToolSpec`): what the manager knows about an agent. Engine-neutral. |
+| `workflow.py`, `activities.py`, `models.py` | agent-executor: the `AgentSession` workflow and its activities; `models.py` is the executor's own data (inputs, signals, state) |
 | `worker.py` | agent-executor: worker process |
 | `server.py` | session-manager: runs the HTTP API (`python -m agent_scheduler_temporal.server`) |
 | `tool_service.py`, `tools.py` | tool service: results by key, started markers, attempt fencing, effects ledger; tool metadata |
@@ -159,7 +164,7 @@ server, the workers and the client all compete; they are not capacity numbers.
 | Fencing: a frozen worker, resumed after another finished, is rejected and causes no second effect | `test_crash.py::test_a_frozen_worker_...` |
 | Crash recovery: `kill -9` at four points (before marker, before effect, after effect, after result), idempotent and non-idempotent; `kill -9` from outside mid-call | `test_crash.py` |
 | "Outcome unknown" appears in the model's input and the call is not repeated; no marker means run | `test_crash.py`, `test_tool_service.py` |
-| Manager and API without Temporal, against an in-memory engine | `test_manager_without_temporal.py` |
+| Manager and API without Temporal, against an in-memory engine; the manager side imports no executor or Temporal code | `test_manager_without_temporal.py`, `test_boundaries.py` |
 | Humans: reply for the open step, wrong step, duplicate, after the session ended or expired (410), no worker to answer (503), tenant and responder checks, message during a tool call, stop, agent version pinned for the session | `test_api.py` |
 | Limits: tenant quota isolation; poison script and step cap; waiting expiry; waiting holds no worker; execution timeout; continue-as-new | `test_api.py`, `test_workflow.py`, `test_limits.py` |
 | Invariant under chaos: 24 sessions, 4 workers, random SIGKILLs, no duplicate effect | `test_chaos.py` (+ `test_invariants.py` proves the checker can fail) |

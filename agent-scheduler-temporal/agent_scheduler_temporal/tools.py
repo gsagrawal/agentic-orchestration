@@ -1,19 +1,11 @@
-"""Tool metadata (data, not code) and the FAKED tools.
+"""The FAKED tools and their metadata (ToolSpec, defined in agent.py).
 
-Adding a tool means adding a ToolSpec; the loop and the tool service never
-branch on a tool's name. Component: part of the tool service / agent definition.
+Tool metadata is data, not code: adding a tool means adding a ToolSpec; the loop and the tool
+service never branch on a tool's name. Component: tool service.
 """
 import time
-from dataclasses import dataclass
 
-
-@dataclass(frozen=True)
-class ToolSpec:
-    name: str
-    type: str  # "api" or "code"
-    idempotent: bool  # True: the backend dedupes on the key, so re-running is safe
-    timeout_s: float
-    grant: str  # the permission an agent version must hold to call this tool
+from agent_scheduler_temporal.agent import ToolSpec
 
 
 class FakeTools:

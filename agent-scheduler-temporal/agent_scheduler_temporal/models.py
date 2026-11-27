@@ -1,7 +1,9 @@
-"""Plain data passed between the workflow and the activities (JSON-serialised by Temporal)."""
+"""Executor-side data: what the workflow and activities pass around (JSON-serialised by Temporal).
+
+The session manager must not import this module; its types live in agent.py."""
 from dataclasses import dataclass, field
 
-from agent_scheduler_temporal.tools import ToolSpec
+from agent_scheduler_temporal.agent import AgentVersion
 
 TASK_QUEUE = "agent-executor"
 
@@ -11,25 +13,6 @@ TASK_QUEUE = "agent-executor"
 # minutes for a real code tool). These values are ASSUMPTIONS chosen for tests, not tuned.
 HEARTBEAT_INTERVAL_S = 1.0
 HEARTBEAT_TIMEOUT_S = 3.0
-
-
-@dataclass
-class AgentVersion:
-    """Pinned for the whole session: it is workflow input, so later edits cannot reach it."""
-
-    agent_id: str
-    version: int
-    tools: list[ToolSpec]  # the tools this version may use, with their metadata
-    grants: list[str]  # a tool is allowed only if its spec.grant is in here
-    step_cap: int
-    script: list[dict]  # FAKED model: the steps it will take, see scripted_model.py
-    loop: bool = False  # FAKED model: repeat the script forever (the "poison" agent)
-    wait_expiry_s: float = 86400.0  # how long a session may wait for a human (the waiting timer)
-    # The active-run limit: the manager sets it as the workflow EXECUTION timeout. Temporal counts
-    # it as wall time from the start of the session, waiting included and across continue-as-new, so
-    # it is really a lifetime limit; keep wait_expiry_s below it or the wait can never expire.
-    active_limit_s: float = 3600.0
-    continue_after_steps: int = 0  # continue-as-new after this many steps in one run; 0 = never
 
 
 @dataclass
@@ -51,6 +34,9 @@ class SessionInput:
     agent: AgentVersion
     message: str
     carry: SessionState | None = None  # None on the first run
+    # Executor setting, set by the engine (not part of the agent): continue-as-new after this many
+    # steps in one run; 0 = only when Temporal suggests it.
+    continue_after_steps: int = 0
 
 
 @dataclass

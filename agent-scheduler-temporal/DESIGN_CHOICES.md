@@ -158,3 +158,15 @@ Running list. Each entry: what I chose, what I rejected.
     is at-least-once and may be late or repeated; the session, not the engine, drops what is not
     for its open step. Another engine must behave the same way.
 53. **`session_id` is the only handle the manager keeps.** It does not hold workflow objects.
+54. **The manager-facing agent type is in its own module (`agent.py`), apart from the executor's data
+    (`models.py`).** `AgentVersion` and `ToolSpec` moved there; `models.py` keeps only what the
+    workflow and activities pass around. Rejected: one shared `models.py` (the manager would import a
+    module that also defines workflow inputs, signals and state).
+55. **`continue_after_steps` moved from the agent to the engine.** It tunes how the executor manages
+    history, not what the agent is, so `TemporalEngine(continue_after_steps=...)` supplies it in the
+    workflow input. Limits the manager enforces at admission (`step_cap`, `wait_expiry_s`,
+    `active_limit_s`) stay on the agent, as in the architecture doc. The faked model's `script` and
+    `loop` stay on the agent too: they stand in for the agent's model definition.
+56. **An import-graph test enforces the boundary** (`test_boundaries.py`), rather than a convention.
+    It parses imports, not text, follows chains inside the package, and reports the chain that leaks.
+    It was checked by adding a forbidden import and seeing it fail. Rejected: a code-review rule only.

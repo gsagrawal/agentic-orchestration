@@ -16,9 +16,9 @@ from agent_scheduler_temporal.session_manager import Quotas, SessionManager
 from agent_scheduler_temporal.temporal_engine import TemporalEngine
 
 
-async def serve(address: str, db_path: str, host: str, port: int, max_active: int, task_queue: str) -> None:
+async def serve(address: str, db_path: str, host: str, port: int, max_active: int, task_queue: str, continue_after_steps: int) -> None:
     client = await Client.connect(address)
-    manager = SessionManager(TemporalEngine(client, task_queue), db_path, Quotas(default_max_active=max_active))
+    manager = SessionManager(TemporalEngine(client, task_queue, continue_after_steps=continue_after_steps), db_path, Quotas(default_max_active=max_active))
     await uvicorn.Server(uvicorn.Config(create_app(manager), host=host, port=port)).serve()
 
 
@@ -30,5 +30,6 @@ if __name__ == "__main__":
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--max-active", type=int, default=5, help="default per-tenant limit on running sessions")
     p.add_argument("--task-queue", default=TASK_QUEUE)
+    p.add_argument("--continue-after-steps", type=int, default=0, help="executor setting; 0 = only when Temporal suggests it")
     a = p.parse_args()
-    asyncio.run(serve(a.address, a.db, a.host, a.port, a.max_active, a.task_queue))
+    asyncio.run(serve(a.address, a.db, a.host, a.port, a.max_active, a.task_queue, a.continue_after_steps))
