@@ -1,0 +1,183 @@
+{
+  "researcher": {
+    "1": {
+      "tools": [
+        "lookup",
+        "set_value",
+        "run_code",
+        "send_email"
+      ],
+      "grants": [
+        "read",
+        "write",
+        "code"
+      ],
+      "step_cap": 20,
+      "script": [
+        {
+          "do": "tool",
+          "tool": "lookup",
+          "args": {
+            "q": "weather"
+          }
+        },
+        {
+          "do": "tool",
+          "tool": "run_code",
+          "args": {
+            "cmd": "ls"
+          }
+        },
+        {
+          "do": "tool",
+          "tool": "send_email",
+          "args": {
+            "to": "boss"
+          }
+        },
+        {
+          "do": "tool",
+          "tool": "set_value",
+          "args": {
+            "k": "done"
+          }
+        },
+        {
+          "do": "finish"
+        }
+      ]
+    }
+  },
+  "poison": {
+    "1": {
+      "tools": [
+        "lookup"
+      ],
+      "grants": [
+        "read"
+      ],
+      "step_cap": 10,
+      "loop": true,
+      "script": [
+        {
+          "do": "tool",
+          "tool": "lookup",
+          "args": {}
+        }
+      ]
+    }
+  },
+  "asker": {
+    "1": {
+      "tools": [
+        "lookup"
+      ],
+      "grants": [
+        "read"
+      ],
+      "step_cap": 20,
+      "wait_expiry_s": 1800,
+      "script": [
+        {
+          "do": "ask_human",
+          "question": "Proceed?"
+        },
+        {
+          "do": "tool",
+          "tool": "lookup",
+          "args": {}
+        },
+        {
+          "do": "finish"
+        }
+      ]
+    }
+  },
+  "mailer": {
+    "1": {
+      "tools": [
+        "send_email",
+        "lookup"
+      ],
+      "grants": [
+        "email",
+        "read"
+      ],
+      "step_cap": 20,
+      "script": [
+        {
+          "do": "tool",
+          "tool": "send_email",
+          "args": {
+            "to": "x"
+          }
+        },
+        {
+          "do": "tool",
+          "tool": "lookup",
+          "args": {}
+        },
+        {
+          "do": "finish"
+        }
+      ]
+    }
+  },
+  "setter": {
+    "1": {
+      "tools": [
+        "set_value",
+        "lookup"
+      ],
+      "grants": [
+        "write",
+        "read"
+      ],
+      "step_cap": 20,
+      "script": [
+        {
+          "do": "tool",
+          "tool": "set_value",
+          "args": {
+            "k": "a"
+          }
+        },
+        {
+          "do": "tool",
+          "tool": "lookup",
+          "args": {}
+        },
+        {
+          "do": "finish"
+        }
+      ]
+    }
+  },
+  "asker-limited": {
+    "1": {
+      "tools": [
+        "lookup"
+      ],
+      "grants": [
+        "read"
+      ],
+      "step_cap": 20,
+      "wait_expiry_s": 7200,
+      "script": [
+        {
+          "do": "ask_human",
+          "question": "Proceed?"
+        },
+        {
+          "do": "tool",
+          "tool": "lookup",
+          "args": {}
+        },
+        {
+          "do": "finish"
+        }
+      ],
+      "active_limit_s": 3600
+    }
+  }
+}
