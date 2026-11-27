@@ -13,7 +13,7 @@ Requirements: Python (written for 3.10+, run only on 3.13) and pytest. Nothing e
 ```
 make test    # about 30 s; includes real kill -9 and a chaos test
 make demo    # 12 sessions, one executor killed mid-run, outcome and invariants printed
-make bench   # throughput and death-to-resume timing; about 5 minutes
+make bench   # throughput and death-to-resume timing; takes several minutes
 ```
 
 ## How the property is enforced
@@ -106,8 +106,7 @@ distributed behaviour. Specifically:
 ## Measurements
 
 Machine: Intel Xeon @ 2.10 GHz, 4 logical CPUs, Linux 6.18, Python 3.13.18, SQLite 3.53.1 (a
-cloud container, other processes may share the host). Produced by `make bench` (about 5
-minutes), one run on the current code; the manager's reconcile pass is every 0.05 s and the
+cloud container, other processes may share the host). Produced by `make bench`, one run on the current code; the manager's reconcile pass is every 0.05 s and the
 executor polls every 0.02 s. An earlier full run on slightly older code gave the same
 picture, and where the two differ it is said below.
 
