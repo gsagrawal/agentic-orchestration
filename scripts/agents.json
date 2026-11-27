@@ -1,0 +1,19 @@
+{
+  "quick": {"1": {"script": [
+    {"do": "tool", "tool": "lookup", "args": {"key": "a"}},
+    {"do": "tool", "tool": "send_email", "args": {"to": "x"}},
+    {"do": "finish"}
+  ]}},
+  "set-value": {"1": {"script": [
+    {"do": "tool", "tool": "set_value", "args": {"key": "k"}},
+    {"do": "finish"}
+  ]}},
+  "ask-human": {"1": {"script": [
+    {"do": "tool", "tool": "lookup", "args": {"key": "a"}},
+    {"do": "wait"},
+    {"do": "finish"}
+  ]}},
+  "poison": {"1": {"script": [
+    {"do": "tool", "tool": "lookup", "args": {"key": "a"}}
+  ], "loop": true}}
+}
