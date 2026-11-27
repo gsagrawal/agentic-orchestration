@@ -106,8 +106,9 @@ distributed behaviour. Specifically:
 ## Measurements
 
 Machine: Intel Xeon @ 2.10 GHz, 4 logical CPUs, Linux 6.18, Python 3.13.18, SQLite 3.53.1 (a
-cloud container, other processes may share the host). Produced by `make bench`, one run on the current code; the manager's reconcile pass is every 0.05 s and the
-executor polls every 0.02 s. An earlier full run on slightly older code gave the same
+cloud container, other processes may share the host). Produced by `make bench`, one run on
+the current code; the manager's reconcile pass is every 0.05 s and the executor polls every
+0.02 s. An earlier full run on slightly older code gave the same
 picture, and where the two differ it is said below.
 
 **Throughput.** 200 `quick` sessions (two tool calls each), seconds from the first admission
@@ -162,7 +163,7 @@ verified that. The default lease (3 s) and heartbeat (0.5 s) are assumptions, no
 ### How sharp is the chaos test? (measured)
 
 A chaos test that never fails proves nothing, so each mutation below was applied to the code
-and `test_chaos.py` run (3 runs of 2 seeds each, so 6 per row). The narrow windows are covered deterministically
+and `test_chaos.py` run (3 runs of 2 seeds each, so 6 per row). These were measured before the later review rounds, which did not change the fencing, recovery or timer code. The narrow windows are covered deterministically
 elsewhere; chaos is the net under them, not the proof of them.
 
 | Mutation | Result |
