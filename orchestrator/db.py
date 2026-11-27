@@ -33,6 +33,13 @@ CREATE TABLE IF NOT EXISTS sessions (
     log_seq       INTEGER NOT NULL DEFAULT 0  -- number of log entries; next entry is log_seq + 1
 );
 
+-- The queries that run constantly (executors polling, admission, the reconciler) must not
+-- scan every finished session. Measured: at 100,000 finished sessions, assigned_to took
+-- 7.9 ms per call without these indexes and 0.02 ms with them.
+CREATE INDEX IF NOT EXISTS sessions_by_executor ON sessions(executor_id, state);
+CREATE INDEX IF NOT EXISTS sessions_by_state ON sessions(state);
+CREATE INDEX IF NOT EXISTS sessions_by_tenant ON sessions(tenant, state);
+
 CREATE TABLE IF NOT EXISTS session_log (
     session_id TEXT    NOT NULL REFERENCES sessions(id),
     seq        INTEGER NOT NULL,

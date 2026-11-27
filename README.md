@@ -85,7 +85,9 @@ distributed behaviour. Specifically:
 
 - One machine means one clock. Here the manager and executors compare `time.time()` values
   directly. With separate machines, **lease checks under clock skew** are a real problem: a
-  skewed executor looks dead, or a dead one looks alive.
+  skewed executor looks dead, or a dead one looks alive. Even on one machine the wall clock
+  can jump (for example an NTP step), which would move every lease and deadline at once; a
+  monotonic clock is safer for leases and is not used here.
 - There is one write lock. `BEGIN IMMEDIATE` gives us exact serialisation for free. On
   Postgres this becomes **row locks** (`SELECT ... FOR UPDATE`, or a conditional `UPDATE`
   as used here, which still works), with deadlocks, lock timeouts and isolation levels to

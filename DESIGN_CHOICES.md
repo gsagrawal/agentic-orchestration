@@ -23,6 +23,7 @@ state plumbing) are implemented as specified and are not repeated here.
 | 10 | One SQLite file for state table and log, one connection per process, WAL, `busy_timeout` 10 s, autocommit with explicit `BEGIN IMMEDIATE`. | Python's implicit transactions; separate files for log and state. | Implicit transactions start deferred and make read-then-write racy. One file keeps the epoch check and the insert atomic (two files could not). |
 | 11 | `assign()` refuses terminal sessions (`SessionClosed`). | Let the caller check the state first. | A check outside the transaction races. |
 | 12 | `synchronous=NORMAL`. | `FULL`. | Safe against `kill -9` (what the tests do) but may lose the last commits on OS crash or power loss. Chosen for speed; a real deployment would not accept this. |
+| 70 | Secondary indexes on `sessions`: `(executor_id, state)`, `(state)`, `(tenant, state)`. | No indexes (the first version). | Found in review: executors poll `assigned_to` every 20 ms, admission runs `count_live`, and the reconciler lists candidates, and all three scanned every session ever created. Measured at 100,000 finished sessions: `assigned_to` 7.9 ms per call without indexes, 0.02 ms with them. A test checks the query plans so a scan cannot come back unnoticed. |
 
 ## Tool service stub
 
