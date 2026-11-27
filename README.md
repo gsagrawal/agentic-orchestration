@@ -13,7 +13,7 @@ Requirements: Python (written for 3.10+, run only on 3.13) and pytest. Nothing e
 ```
 make test    # about 30 s; includes real kill -9 and a chaos test
 make demo    # 12 sessions, one executor killed mid-run, outcome and invariants printed
-make bench   # throughput and death-to-resume timing; takes several minutes
+make bench   # throughput and death-to-resume timing; about 5 minutes
 ```
 
 ## How the property is enforced
@@ -106,28 +106,32 @@ distributed behaviour. Specifically:
 ## Measurements
 
 Machine: Intel Xeon @ 2.10 GHz, 4 logical CPUs, Linux 6.18, Python 3.13.18, SQLite 3.53.1 (a
-cloud container, other processes may share the host). Produced by `make bench`, one run, on
-the final code; the manager's reconcile pass is every 0.05 s and the executor polls every 0.02 s.
+cloud container, other processes may share the host). Produced by `make bench` (about 5
+minutes), one run on the current code; the manager's reconcile pass is every 0.05 s and the
+executor polls every 0.02 s. An earlier full run on slightly older code gave the same
+picture, and where the two differ it is said below.
 
 **Throughput.** 200 `quick` sessions (two tool calls each), seconds from the first admission
 until all have ended, 3 runs per cell, median shown (all runs in parentheses).
 
 | Executors | Tool delay 0.01 s (sessions/s) | Tool delay 0 (sessions/s) |
 |-----------|-------------------------------|---------------------------|
-| 1 | 31.4 (31.5, 31.4, 31.4) | 957 (872, 1056, 957) |
-| 2 | 62.0 (62.1, 62.0, 61.7) | 1027 (1064, 1027, 954) |
-| 4 | 122.5 (122.5, 123.2, 121.3) | 963 (1195, 921, 963) |
-| 8 | 234.0 (234.0, 227.4, 239.2) | 807 (878, 807, 806) |
+| 1 | 31.5 (31.2, 31.5, 31.5) | 916 (835, 923, 916) |
+| 2 | 61.9 (61.9, 62.7, 61.9) | 1012 (1002, 1012, 1111) |
+| 4 | 122.2 (122.6, 122.2, 121.1) | 923 (923, 811, 993) |
+| 8 | 243.3 (242.1, 243.3, 243.6) | 1018 (1018, 915, 1131) |
 
 How to read it, and what I did not find out:
 - With a 10 ms tool delay the executors are mostly asleep, so throughput is set by the delay
   and grows in proportion to the executor count, even at 8 executors on 4 cores. That shows
   sessions spread across executors without interference. It is **not** a capacity figure.
-- With no delay, throughput stays around 800 to 1,200 sessions/s whatever the executor count,
-  and 8 executors are slower than 1. Something shared is the limit. I did not isolate it;
-  candidates are the single SQLite write lock, the manager's 0.05 s pass, and admitting
-  sessions one by one from a single thread. Each of these runs lasts about 0.2 s, so the
-  numbers are noisy (range 806 to 1,195).
+- With no delay, throughput stays around 800 to 1,100 sessions/s whatever the executor count.
+  Something shared is the limit. I did not isolate it; candidates are the single SQLite write
+  lock, the manager's 0.05 s pass, and admitting sessions one by one from a single thread.
+  It is not the missing-index scan fixed in review: with only 200 sessions in the table that
+  scan is too cheap to matter. Each of these runs lasts about 0.2 s, so the numbers are noisy
+  (806 to 1,195 across the two full runs), and the two runs disagree on whether 8 executors
+  are slower than 1 (the first said yes, this one no), so I draw no trend from it.
 
 **Executor death to resumed session.** 4 executors, 40 never-ending sessions, tool delay
 0.02 s, one randomly chosen executor SIGKILLed per trial, 8 trials. "Resumed" means the first
@@ -137,14 +141,15 @@ independent samples; the independent count is 8 kills).
 
 | Lease / heartbeat | p50 | p95 | max |
 |-------------------|-----|-----|-----|
-| 0.6 s / 0.1 s | 0.69 s | 0.80 s | 0.82 s |
-| 3.0 s / 0.5 s | 2.83 s | 3.06 s | 3.10 s |
+| 0.6 s / 0.1 s | 0.69 s | 0.81 s | 0.82 s |
+| 3.0 s / 0.5 s | 3.03 s | 3.17 s | 3.19 s |
 
-The time is essentially the lease: the manager cannot act before the lease runs out. The p50
-is a little under the lease because the last heartbeat was already partly aged when the
-executor died; the p95 is a little over, which is the reconcile pass, the replay and the first
-write. I did not measure those parts separately. The default lease (3 s) and heartbeat
-(0.5 s) are assumptions, not tuned values.
+The time is essentially the lease: the manager cannot act before the lease runs out, and the
+reconcile pass, the replay and the first write add a little on top. I did not measure those
+parts separately. For the 3 s lease the earlier full run gave p50 2.83 s and p95 3.06 s, so the
+p50 moves by about 0.2 s between runs. I believe that is because only 8 kills are independent
+and the heartbeat's age at the moment of the kill is random (up to 0.5 s here); I have not
+verified that. The default lease (3 s) and heartbeat (0.5 s) are assumptions, not tuned values.
 
 ## Tests, by property
 
