@@ -130,7 +130,9 @@ worker are the Temporal-specific part by design, and would be rewritten for anot
 - **History is carried whole through continue-as-new.** That bounds the number of Temporal events,
   not the size of the payload; a long session with real model output would hit Temporal's payload
   size limit. A real design keeps the history in the session log (object store) and carries a
-  pointer. Not measured here: the fake steps are a few hundred bytes.
+  pointer. Measured: one fake step adds about 230 bytes of JSON to the history (102 for the model
+  action, 128 for the tool result); real model output would be far larger, and the limit itself was not
+  reached or measured here.
 - **A session stopped by the active-run limit gets no cleanup**, so its sandbox is not stopped by
   the workflow (the real sandbox controller has its own deadline; the fake would leak).
 - **The active-run limit is a lifetime limit** (it includes waiting); see DESIGN_CHOICES 32.
@@ -140,8 +142,9 @@ worker are the Temporal-specific part by design, and would be rewritten for anot
 - Each tool call holds a thread for its whole duration (Python's default pool, a few per core), which
   caps concurrent tool calls per worker. Not tuned or measured.
 - The reply/message/stop API takes a session id the caller already knows; there is no status or list endpoint.
-- The manager's quota table is one SQLite file; it is not safe to run more than one manager against
-  a real shared database without redesign.
+- The manager's quota table is one SQLite file read and written on the API's event loop. One manager
+  process is fine; a second process sharing the file could block the first for up to 30 s (SQLite's
+  lock wait), and a real shared database would need a different design for the quota check.
 - Retention, history size limits and workflow versioning (changing workflow code under running
   sessions) are not addressed.
 

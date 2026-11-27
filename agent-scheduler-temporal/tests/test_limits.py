@@ -110,3 +110,18 @@ async def test_continue_as_new_keeps_the_sandbox_and_the_message_dedupe(env, tmp
         assert s.sandbox.calls("can-2").count(("stop", False)) == 1
         assert s.sandbox.calls("can-2").count(("ensure", True)) == 1
         assert not any(m["role"] == "system" for m in result.history)  # never "recreated"
+
+
+async def test_a_message_signalled_with_the_start_is_not_forgotten_by_the_dedupe(env, tmp_path):
+    """Signal-with-start: the message handler runs before run() begins. The dedupe set it fills must
+    survive, so the same message id sent again is still dropped."""
+    script = [tool("run_code", n=i) for i in range(3)] + [{"do": "finish"}]
+    async with System(env, tmp_path, "q-s7-g", tool_delay_s=0.4) as s:
+        handle = await s.env.client.start_workflow(
+            AgentSession.run, SessionInput("sws-1", "acme", build(script), "go"), id="sws-1", task_queue=s.task_queue,
+            start_signal="message", start_signal_args=[MessageSignal("m1", "first")],
+        )
+        await wait_until(lambda: s.tools.state("sws-1:0") != "none")
+        await handle.signal(AgentSession.message, MessageSignal("m1", "again"))
+        result = await handle.result()
+        assert [m["content"] for m in result.history if m.get("message_id") == "m1"] == ["first"]

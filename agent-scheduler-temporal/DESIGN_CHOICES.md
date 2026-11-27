@@ -170,3 +170,11 @@ Running list. Each entry: what I chose, what I rejected.
 56. **An import-graph test enforces the boundary** (`test_boundaries.py`), rather than a convention.
     It parses imports, not text, follows chains inside the package, and reports the chain that leaks.
     It was checked by adding a forbidden import and seeing it fail. Rejected: a code-review rule only.
+
+## Review round 3 (whole implementation)
+
+57. **Workflow state is restored in `@workflow.init`, not in `run()`.** A signal can be processed
+    before `run()` starts (signal-with-start, or right after a continue-as-new). `run()` used to
+    replace the message-id set, forgetting an id a signal had just recorded, so a repeat of that
+    message got through. Found by reading the code; a test with signal-with-start failed before the
+    fix and passes after.

@@ -31,9 +31,12 @@ SANDBOX_RECREATED = "The sandbox was recreated. Files created in earlier steps a
 
 @workflow.defn(name="AgentSession")
 class AgentSession:
-    def __init__(self) -> None:
+    @workflow.init
+    def __init__(self, inp: SessionInput) -> None:
+        # Runs before any signal handler, so state restored here cannot overwrite what a signal that
+        # arrived with the start (or right after a continue-as-new) has already recorded.
         self._inbox: list[dict] = []  # messages not yet shown to the model
-        self._seen_message_ids: set[str] = set()
+        self._seen_message_ids: set[str] = set(inp.carry.seen_message_ids) if inp.carry else set()
         self._replies: dict[int, str] = {}  # step -> the first reply received for it
         self._open_step: int | None = None  # the step currently waiting for a human
         self._stop_requested = False
@@ -69,7 +72,6 @@ class AgentSession:
         specs = {t.name: t for t in agent.tools}
         carry = inp.carry or SessionState([{"role": "user", "content": inp.message}], 0, [], False, False, 0)
         history = carry.history
-        self._seen_message_ids = set(carry.seen_message_ids)
         sandbox_used = carry.sandbox_used
         sandbox_created_before = carry.sandbox_created_before
         step = carry.step
