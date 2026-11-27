@@ -1,21 +1,18 @@
-"""session-manager: admission, per-tenant quotas, and the start of a session workflow.
+"""session-manager: admission, per-tenant quotas, and who may talk to which session.
 
-Admission is checked before the workflow is started. The manager keeps one small table
-(session -> tenant, user, workflow state); it holds no call-by-call record.
+Admission is checked before the session is started. The manager keeps one small table
+(session -> tenant, user, active flag); it holds no call-by-call record. It reaches the thing that
+runs sessions only through the SessionEngine interface (engine.py), so it knows nothing about
+Temporal; see temporal_engine.py for the Temporal implementation.
 """
 import sqlite3
 import uuid
 from dataclasses import dataclass
-from datetime import timedelta
 from pathlib import Path
-
-from temporalio.client import Client, WorkflowExecutionStatus
-from temporalio.service import RPCError, RPCStatusCode
 
 from agent_scheduler_temporal.agent_store import DEFAULT_PATH, load_agent
 from agent_scheduler_temporal.db import txn
-from agent_scheduler_temporal.models import TASK_QUEUE, MessageSignal, ReplySignal, SessionInput
-from agent_scheduler_temporal.workflow import AgentSession
+from agent_scheduler_temporal.engine import EngineUnavailable, SessionEngine, SessionStatus
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -61,16 +58,11 @@ class Quotas:
 
 
 class SessionManager:
-    def __init__(
-        self, client: Client, db_path: str, quotas: Quotas, task_queue: str = TASK_QUEUE,
-        agents_path: Path = DEFAULT_PATH, query_timeout_s: float = 5.0,
-    ):
-        self._client = client
+    def __init__(self, engine: SessionEngine, db_path: str, quotas: Quotas, agents_path: Path = DEFAULT_PATH):
+        self._engine = engine
         self._db = db_path
         self._quotas = quotas
-        self._task_queue = task_queue
         self._agents_path = agents_path
-        self._query_timeout = timedelta(seconds=query_timeout_s)
         conn = sqlite3.connect(db_path)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(SCHEMA)
@@ -86,61 +78,47 @@ class SessionManager:
                 raise QuotaExceeded(f"tenant {tenant} has {active} active sessions (limit {self._quotas.limit(tenant)})")
             c.execute("INSERT INTO sessions VALUES (?, ?, ?, 1)", (session_id, tenant, user))
         try:
-            await self._client.start_workflow(
-                AgentSession.run,
-                SessionInput(session_id, tenant, agent, message),
-                id=session_id,
-                task_queue=self._task_queue,
-                **self._timeouts(agent),
-            )
+            await self._engine.start(session_id, tenant, agent, message)
         except BaseException:
             with txn(self._db) as c:
                 c.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
             raise
         return session_id
 
-    def _timeouts(self, agent) -> dict:
-        return {"execution_timeout": timedelta(seconds=agent.active_limit_s)}  # the active-run limit
-
     async def _close_finished(self, tenant: str) -> None:
-        """Quota counts sessions that are still running. Ask Temporal which ones are not.
+        """Quota counts sessions that are still running. Ask the engine which ones are not.
         Bounded by the tenant's quota, since only active rows are looked at."""
         with txn(self._db) as c:
             ids = [r[0] for r in c.execute("SELECT session_id FROM sessions WHERE tenant = ? AND active = 1", (tenant,))]
         for session_id in ids:
-            try:
-                running = (await self._client.get_workflow_handle(session_id).describe()).status == WorkflowExecutionStatus.RUNNING
-            except RPCError as e:
-                if e.status != RPCStatusCode.NOT_FOUND:
-                    raise
-                running = False  # a row whose workflow never started (we died between insert and start)
-            if not running:
+            # NOT_FOUND: a row whose session never started (we died between insert and start).
+            if await self._engine.status(session_id) != SessionStatus.RUNNING:
                 with txn(self._db) as c:
                     c.execute("UPDATE sessions SET active = 0 WHERE session_id = ?", (session_id,))
 
     # ---- interaction with a running session ----
 
     async def reply(self, tenant: str, user: str, session_id: str, step: int, text: str) -> None:
-        handle = await self._open_handle(tenant, user, session_id)
-        try:  # a query is answered by a worker, so with none running it would wait: bound it
-            open_step = await handle.query(AgentSession.open_step, rpc_timeout=self._query_timeout)
-        except RPCError as e:
-            raise Unavailable(f"session {session_id} did not answer: {e.message}") from e
+        await self._authorize(tenant, user, session_id)
+        try:
+            open_step = await self._engine.open_step(session_id)
+        except EngineUnavailable as e:
+            raise Unavailable(str(e)) from e
         if open_step != step:
             raise NotOpenStep(f"session {session_id} is not waiting at step {step}")
-        await handle.signal(AgentSession.reply, ReplySignal(step, text))
-        # Between the query and the signal the step can close. The workflow is the authority: it
+        await self._engine.reply(session_id, step, text)
+        # Between the check and the delivery the step can close. The session is the authority: it
         # drops a reply that is not for its open step, so a late or duplicate reply is harmless.
 
     async def message(self, tenant: str, user: str, session_id: str, message_id: str, text: str) -> None:
-        handle = await self._open_handle(tenant, user, session_id)
-        await handle.signal(AgentSession.message, MessageSignal(message_id, text))
+        await self._authorize(tenant, user, session_id)
+        await self._engine.message(session_id, message_id, text)
 
     async def stop(self, tenant: str, user: str, session_id: str) -> None:
-        handle = await self._open_handle(tenant, user, session_id)
-        await handle.signal(AgentSession.stop)
+        await self._authorize(tenant, user, session_id)
+        await self._engine.stop(session_id)
 
-    async def _open_handle(self, tenant: str, user: str, session_id: str):
+    async def _authorize(self, tenant: str, user: str, session_id: str) -> None:
         """Tenant check, then responder check, then 'is it still running'. Order matters: another
         tenant's session must look like it does not exist."""
         with txn(self._db) as c:
@@ -149,7 +127,5 @@ class SessionManager:
             raise UnknownSession(session_id)
         if row[1] != user:
             raise NotResponder(session_id)
-        handle = self._client.get_workflow_handle(session_id)
-        if (await handle.describe()).status != WorkflowExecutionStatus.RUNNING:
+        if await self._engine.status(session_id) != SessionStatus.RUNNING:
             raise SessionClosed(session_id)
-        return handle

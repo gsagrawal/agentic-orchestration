@@ -20,11 +20,58 @@ SDK on first use** (`WorkflowEnvironment.start_time_skipping()` / `.start_local(
 CLI or Docker step, but the host `temporal.download` must be reachable. Install:
 `pip install -r requirements.txt`. Run the `make` targets from this folder.
 
+## Architecture: who talks to whom
+
+Temporal has three roles, and this PoC uses each for one component:
+
+| Role | In this PoC | Does |
+|------|-------------|------|
+| **Client** | session manager (`session_manager.py`, via `temporal_engine.py`) | starts workflows; signals, queries and describes them. Runs no workflow code. |
+| **Worker** | agent executor (`worker.py`) | hosts the code of the `AgentSession` workflow and the activities; runs it when Temporal hands it a task. |
+| **Server** | the Temporal dev server | stores every session's history and hands tasks to workers. |
+
+```
+ client (HTTP API) ---> session manager ---gRPC---> Temporal server <---gRPC (long-poll)--- executor (worker)
+                        quotas, who may talk       histories, timers,                       runs AgentSession
+                        to which session           task queues                              and its activities
+```
+
+- **The manager and the executor never talk to each other.** The only channel is Temporal. The
+  executor never calls the manager; the manager learns a session ended by asking (`describe`) when
+  it checks a quota or serves a request. They share no database: the manager has `sessions.db`
+  (tenant, user, active flag) and reads `agents.json`; the worker uses the fake tool, sandbox and
+  notifier files under `--data-dir`.
+- **A workflow is not a service or a process.** One `AgentSession` instance per session is a durable
+  record of events on the server. When something happens to it (start, signal, timer, finished
+  activity) the server hands a workflow task to some worker, which replays the history through the
+  workflow code, decides the next step and returns. The next task may go to a different worker,
+  which is why a killed worker does not lose the session.
+- **Activities** (model, tool, sandbox, notification) also run in the executor process, but each is
+  its own task that Temporal can retry on another worker.
+- **Replaces the reconciler and epoch in `../docs/service-architecture.md`:** starting a workflow
+  queues work for any live worker; Temporal's retries do the recovery; the activity attempt number
+  does the fencing the epoch did.
+- **Who runs Temporal:** nothing in this repo runs it as a service. The tests, demo and benchmark
+  start a throwaway single-node in-memory dev server (`WorkflowEnvironment.start_local()`); `worker.py`
+  and `server.py` take `--address` (default `localhost:7233`) and expect a server there. In
+  production it would be a Temporal cluster or Temporal Cloud, run by whoever owns the platform.
+
+### The engine interface (the manager does not depend on Temporal)
+
+The manager reaches the thing that runs sessions only through `SessionEngine` (`engine.py`): `start`,
+`status`, `open_step`, `reply`, `message`, `stop`. `temporal_engine.py` is the one implementation and
+the only file on the manager's side that imports `temporalio`. To replace Temporal with an API call
+or a message queue, write another class with those methods; `session_manager.py` and `api.py` do not
+change. `tests/test_manager_without_temporal.py` runs the whole manager and API against an in-memory
+engine to keep that true. Only the manager side is behind the interface: the workflow, activities and
+worker are the Temporal-specific part by design, and would be rewritten for another engine.
+
 ## Layout (one module per component)
 
 | Module | Component |
 |--------|-----------|
-| `api.py`, `session_manager.py` | session-manager: HTTP API (FastAPI), admission, per-tenant quotas, reply / message / stop |
+| `api.py`, `session_manager.py` | session-manager: HTTP API (FastAPI), admission, per-tenant quotas, reply / message / stop. No Temporal imports. |
+| `engine.py`, `temporal_engine.py` | the interface the manager uses to reach the runner, and its Temporal implementation |
 | `workflow.py`, `activities.py`, `models.py` | agent-executor: the `AgentSession` workflow and its activities |
 | `worker.py` | agent-executor: worker process |
 | `server.py` | session-manager: runs the HTTP API (`python -m agent_scheduler_temporal.server`) |
@@ -112,6 +159,7 @@ server, the workers and the client all compete; they are not capacity numbers.
 | Fencing: a frozen worker, resumed after another finished, is rejected and causes no second effect | `test_crash.py::test_a_frozen_worker_...` |
 | Crash recovery: `kill -9` at four points (before marker, before effect, after effect, after result), idempotent and non-idempotent; `kill -9` from outside mid-call | `test_crash.py` |
 | "Outcome unknown" appears in the model's input and the call is not repeated; no marker means run | `test_crash.py`, `test_tool_service.py` |
+| Manager and API without Temporal, against an in-memory engine | `test_manager_without_temporal.py` |
 | Humans: reply for the open step, wrong step, duplicate, after the session ended or expired (410), no worker to answer (503), tenant and responder checks, message during a tool call, stop, agent version pinned for the session | `test_api.py` |
 | Limits: tenant quota isolation; poison script and step cap; waiting expiry; waiting holds no worker; execution timeout; continue-as-new | `test_api.py`, `test_workflow.py`, `test_limits.py` |
 | Invariant under chaos: 24 sessions, 4 workers, random SIGKILLs, no duplicate effect | `test_chaos.py` (+ `test_invariants.py` proves the checker can fail) |

@@ -141,3 +141,20 @@ Running list. Each entry: what I chose, what I rejected.
 48. **Worker handles SIGTERM and SIGINT by shutting down cleanly.** `kill -9` is still what the
     crash tests use.
 49. **Requirements are pinned to the versions the tests ran with.**
+
+## Engine interface
+
+50. **The session manager reaches Temporal only through `SessionEngine`** (`engine.py`, six methods),
+    implemented by `TemporalEngine`. You may later replace Temporal with an API call or a message
+    queue on the manager side. Rejected: using the Temporal client directly in the manager (every
+    quota and authorisation path would carry Temporal types and errors). Temporal-only details moved
+    into the adapter: the active-run limit as the workflow execution timeout, the query timeout, the
+    NOT_FOUND-to-status mapping.
+51. **The interface covers the manager side only.** The workflow, activities and worker are the
+    Temporal-specific part; abstracting them would mean designing a second engine we do not have.
+    Rejected: a workflow-engine abstraction layer (speculative, and it would blur the guarantees
+    that depend on Temporal's retries, attempt numbers and replay).
+52. **The interface states its contract in prose** (engine.py): delivery of reply, message and stop
+    is at-least-once and may be late or repeated; the session, not the engine, drops what is not
+    for its open step. Another engine must behave the same way.
+53. **`session_id` is the only handle the manager keeps.** It does not hold workflow objects.

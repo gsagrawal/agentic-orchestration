@@ -9,6 +9,7 @@ from agent_scheduler_temporal.notifier import FakeNotifier
 from agent_scheduler_temporal.sandbox import FakeSandboxController
 from agent_scheduler_temporal.scripted_model import ScriptedModel
 from agent_scheduler_temporal.session_manager import Quotas, SessionManager
+from agent_scheduler_temporal.temporal_engine import TemporalEngine
 from agent_scheduler_temporal.tool_service import ToolService
 from agent_scheduler_temporal.tools import FakeTools
 from agent_scheduler_temporal.workflow import AgentSession
@@ -61,8 +62,9 @@ class System:
         self.sandbox = FakeSandboxController(str(tmp_path / "s.db"))
         acts = Activities(self.tools, self.sandbox, self.notifier, self.model)
         self.worker = Worker(env.client, task_queue=task_queue, workflows=[AgentSession], activities=acts.all, **(worker_options or {}))
-        manager = SessionManager(env.client, str(tmp_path / "m.db"), quotas or Quotas(default_max_active=50), task_queue=task_queue,
-                                  **({"agents_path": agents_path} if agents_path else {}), query_timeout_s=query_timeout_s)
+        engine = TemporalEngine(env.client, task_queue, query_timeout_s)
+        manager = SessionManager(engine, str(tmp_path / "m.db"), quotas or Quotas(default_max_active=50),
+                                 **({"agents_path": agents_path} if agents_path else {}))
         self.api = httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(manager)), base_url="http://api")
 
     async def __aenter__(self):

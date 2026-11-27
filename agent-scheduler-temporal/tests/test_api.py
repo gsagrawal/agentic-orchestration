@@ -7,6 +7,7 @@ from agent_scheduler_temporal.activities import Activities
 from agent_scheduler_temporal.api import create_app
 from agent_scheduler_temporal.sandbox import FakeSandboxController
 from agent_scheduler_temporal.session_manager import Quotas, SessionManager
+from agent_scheduler_temporal.temporal_engine import TemporalEngine
 from agent_scheduler_temporal.tool_service import ToolService
 from agent_scheduler_temporal.workflow import AgentSession
 
@@ -14,7 +15,7 @@ from agent_scheduler_temporal.workflow import AgentSession
 @pytest.fixture
 def make_api(env, tmp_path):
     def make(quotas: Quotas, task_queue: str):
-        manager = SessionManager(env.client, str(tmp_path / "sessions.db"), quotas, task_queue=task_queue)
+        manager = SessionManager(TemporalEngine(env.client, task_queue), str(tmp_path / "sessions.db"), quotas)
         return httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(manager)), base_url="http://api")
 
     return make

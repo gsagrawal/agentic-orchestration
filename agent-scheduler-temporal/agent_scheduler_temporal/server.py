@@ -13,11 +13,12 @@ from temporalio.client import Client
 from agent_scheduler_temporal.api import create_app
 from agent_scheduler_temporal.models import TASK_QUEUE
 from agent_scheduler_temporal.session_manager import Quotas, SessionManager
+from agent_scheduler_temporal.temporal_engine import TemporalEngine
 
 
 async def serve(address: str, db_path: str, host: str, port: int, max_active: int, task_queue: str) -> None:
     client = await Client.connect(address)
-    manager = SessionManager(client, db_path, Quotas(default_max_active=max_active), task_queue=task_queue)
+    manager = SessionManager(TemporalEngine(client, task_queue), db_path, Quotas(default_max_active=max_active))
     await uvicorn.Server(uvicorn.Config(create_app(manager), host=host, port=port)).serve()
 
 
